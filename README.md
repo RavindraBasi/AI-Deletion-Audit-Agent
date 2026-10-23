@@ -126,11 +126,18 @@ This repository includes [`AGENTS.md`](./AGENTS.md), which instructs compatible 
 
 You may use any programming language, model, framework, or retrieval approach. Include clear setup and execution instructions in `README.md` inside `code.zip`.
 
-To package `code.zip` from the repository root without bundling the dataset, dependencies, or nested archives:
+To package `code.zip` from the repository root without bundling the dataset:
+
+**macOS / Linux:**
 
 ```bash
-zip -r code.zip README.md code/ \
-  -x "*/__pycache__/*" "*/.venv/*" "*/venv/*" "*/node_modules/*" "*/.git/*" "*/.DS_Store"
+zip -r code.zip README.md code -x "*/__pycache__/*" "*/.venv/*" "*/venv/*" "*/node_modules/*" "*/.git/*" "*/.DS_Store"
+```
+
+**Windows (PowerShell):**
+
+```powershell
+Compress-Archive -Path README.md, code -DestinationPath code.zip -Force
 ```
 
 When packaging `code.zip`:
