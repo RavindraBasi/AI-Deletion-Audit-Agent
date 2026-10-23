@@ -45,7 +45,7 @@ All participant-facing files are inside `dataset/`.
 | `evidence_files.csv` | Manifest of the supplied evidence files |
 | `output.csv` | Blank submission template |
 
-Evidence may be stored as PDFs, images, logs, JSON, or SQLite-compatible SQL snapshot exports under `dataset/evidence/`.
+Evidence may be stored as PDFs, images, logs, JSON, plain text, or SQLite-compatible SQL snapshot exports under `dataset/evidence/`. SQL captures may contain a primary database, regional replicas, a reporting replica, or a failover replica so replication drift can be investigated directly.
 
 ## Input
 
@@ -71,7 +71,7 @@ case_id,deletion_status,steps_json
 | `deletion_status` | `COMPLETE`, `INCOMPLETE`, or `NOT_APPLICABLE` |
 | `steps_json` | Ordered JSON array of findings, remediation actions, and verification checks |
 
-The final file must contain exactly 518 data rows, sorted by `case_id`.
+The final file must contain exactly 518 data rows, sorted numerically by `case_id` (matching the row order in `deletion_requests.csv`, from `case_33` to `case_550`).
 
 Each object in `steps_json` must contain:
 
@@ -94,7 +94,7 @@ For `COMPLETE`, include only verification steps proving the current state. For `
 A non-deletion row therefore has this form:
 
 ```csv
-C0501,NOT_APPLICABLE,[]
+case_533,NOT_APPLICABLE,[]
 ```
 
 The grader parses `steps_json` as JSON. JSON object-key order and whitespace are ignored; array order is not.
@@ -125,9 +125,10 @@ The grader parses `steps_json` as JSON. JSON object-key order and whitespace are
 - Determine the state at `audit_at`. Reported statuses do not prove deletion.
 - Follow `deletion_rules.csv` and identify any sync or restore process that could recreate the data.
 - When policy permits an account tombstone, preserve its stable subject reference while removing every prohibited direct identifier.
-- Order steps as findings, remediation, then verification.
+- Use `REPORT_REMAINING_RECORD` when a record or secondary-identifier copy that must be removed still exists, and `REPORT_EXPOSED_PII` when a record still exposes direct personal identifiers (for example in support records, analytics profiles, marketing records, logs, or unredacted tombstones).
+- Order steps as findings, remediation, then verification, following the canonical system ordering shown in `sample_output.csv`.
 - Disable data flows and block restore risks before changing records.
-- Findings must cite evidence. Proposed remediation and future verification steps use an empty `evidence_id`.
+- Findings must cite evidence. Proposed remediation and future verification steps for `INCOMPLETE` cases use an empty `evidence_id` (`""`), and `VERIFICATION` must cover all relevant systems for the user (including already-absent account records and required retained records).
 - Verification steps for a `COMPLETE` case must cite evidence proving the current state.
 
 ## Evaluation
