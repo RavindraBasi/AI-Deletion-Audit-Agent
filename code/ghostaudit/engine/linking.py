@@ -46,6 +46,7 @@ class Linker:
     cadence_hist: Counter = field(default_factory=Counter)
     lead_range: tuple | None = None
     first_phase: dict = field(default_factory=dict)  # step class -> accepted (delta mod 60 s) of 1st step
+    model: dict | None = None                         # frozen workflow model (see export_model)
 
     def __post_init__(self):
         self.profile_deletions = sorted((a for a in self.activities if is_profile_deletion(a)),
@@ -58,7 +59,24 @@ class Linker:
             for ident in self.resolver.subject_for_user(uid).identifiers:
                 if ident[0] in LINK_TYPES:
                     self.owner_index[ident].add(uid)
-        self._learn_cadence()
+        if self.model:
+            self.cadence = {k: set(v) for k, v in self.model["cadence"].items()}
+            self.spacing = dict(self.model.get("spacing", {}))
+            self.first_phase = {k: set(v) for k, v in self.model.get("first_phase", {}).items()}
+            lr = self.model.get("lead_range_minutes")
+            self.lead_range = tuple(lr) if lr else None
+        else:
+            self._learn_cadence()
+
+    def export_model(self) -> dict:
+        """The learned workflow model: properties of the deletion worker, not facts about any person."""
+        return {
+            "cadence": {k: sorted(v) for k, v in sorted(self.cadence.items())},
+            "spacing": {k: round(v, 2) for k, v in sorted(self.spacing.items())},
+            "first_phase": {k: sorted(v) for k, v in sorted(self.first_phase.items())},
+            "lead_range_minutes": [round(x, 2) for x in self.lead_range] if self.lead_range else None,
+            "phase_histogram": {f"{c}:{p}": n for (c, p), n in sorted(self.cadence_hist.items())},
+        }
 
     # ---------- direct links ----------
     def owners(self, resource_id: str, as_of: datetime | None) -> set[str]:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 
 from ..models import Activity, EvidenceFile
@@ -19,8 +20,22 @@ EXTRACTORS = {
 }
 
 
+FILE_ALIAS_RE = re.compile(r"\b([a-z]+(?:_[a-z]+)*_\d+) \(([^()\s]+\.[A-Za-z0-9]{2,4})\)")
+
+
+def file_aliases(activities: list[Activity]) -> dict[str, str]:
+    """`object_19 (delivery_confirmation_19.pdf)` in a data-catalog link maps a file name to its resource id."""
+    out = {}
+    for a in activities:
+        if a.event_type == "LINK_RESOURCE_IDENTITY":
+            for rid, name in FILE_ALIAS_RE.findall(a.details):
+                out[name] = rid
+    return out
+
+
 def build_observation_store(manifest: list[EvidenceFile], activities: list[Activity], llm=None) -> ObservationStore:
     store = ObservationStore()
+    aliases = file_aliases(activities)
     for ef in sorted(manifest, key=lambda e: e.file_id):
         suffix = ef.path.suffix.lower()
         if not ef.path.exists():
@@ -36,6 +51,11 @@ def build_observation_store(manifest: list[EvidenceFile], activities: list[Activ
         n = 0
         present_by_system = defaultdict(set)
         for raw in records:
+            if raw.resource_id.startswith("file:"):
+                rid = aliases.get(raw.resource_id[5:])
+                if rid is None:
+                    continue
+                raw.resource_id = rid
             obs = to_observation(raw)
             if obs is None:
                 continue

@@ -8,7 +8,7 @@ from ..evidence.records import system_for
 from ..evidence.store import ObservationStore
 from ..identity import IdentityResolver, Subject
 from ..intent import DELETE, IntentLabel
-from ..models import Activity, Case, CaseResult, Kind, Observation
+from ..models import Activity, Case, CaseResult, Kind, Observation, Step
 from .linking import Linker, assign_workflows
 from .planner import ResourcePlan, build_steps
 from .policy import Policy
@@ -93,7 +93,7 @@ def audit_case(case: Case, ctx: AuditContext) -> CaseResult:
     plans: list[ResourcePlan] = []
     for rid in sorted(owned):
         system_id = system_for(rid)
-        if system_id in {"unknown", "object_storage", "cache_service"}:
+        if system_id == "unknown":
             continue
         observations = ctx.store.by_resource(rid)
         category = _category(observations, case.audit_at)
@@ -114,8 +114,7 @@ def audit_case(case: Case, ctx: AuditContext) -> CaseResult:
         plans.append(ResourcePlan(system_id, rid, decision, state, owned[rid]))
 
     if not plans:
-        trace["note"] = "no owned resource found"
-        return CaseResult(case.case_id, "COMPLETE", [], trace) if False else _no_resource(case, trace)
+        return _no_resource(case, ctx, subject, direct, trace)
 
     status, steps = build_steps(plans)
     trace["resources"] = [
@@ -127,10 +126,18 @@ def audit_case(case: Case, ctx: AuditContext) -> CaseResult:
     return CaseResult(case.case_id, status, steps, trace)
 
 
-def _no_resource(case: Case, trace: dict) -> CaseResult:
-    """No resource of the subject is observable: nothing to remediate, but COMPLETE needs cited proof, so the
-    case is reported INCOMPLETE only if that is impossible. We return NOT_APPLICABLE-free COMPLETE with no steps
-    is invalid, therefore the defined behaviour is: INCOMPLETE is never invented; emit an empty COMPLETE marker
-    that the output validator will flag for review."""
-    trace["note"] = "no observable resource for subject"
-    return CaseResult(case.case_id, "COMPLETE", [], trace)
+def _no_resource(case: Case, ctx: AuditContext, subject: Subject, direct: dict, trace: dict) -> CaseResult:
+    """Defined behaviour when no resource of the subject is observable at audit_at.
+
+    The best-scoring profile deletion in the request window (even if another request also claims it) is the
+    only footprint left: its account is verified ABSENT citing that deletion event. With no workflow at all
+    there is nothing to audit, and the case is reported NOT_APPLICABLE with the reason in the trace (a COMPLETE
+    row needs cited proof and an INCOMPLETE row needs a cited finding, neither of which exists)."""
+    cands = ctx.linker.workflow_candidates(case, subject, direct, ctx.linker.lead_range, case.audit_at)
+    if cands:
+        acc = cands[0][1]
+        trace["note"] = f"no observable resource; fell back to workflow {acc.activity_id}"
+        steps = [Step("VERIFICATION", "account_service", acc.resource_id, "VERIFY_RECORD_ABSENT", "ABSENT", acc.activity_id)]
+        return CaseResult(case.case_id, "COMPLETE", steps, trace)
+    trace["note"] = "no observable resource and no deletion workflow for the subject"
+    return CaseResult(case.case_id, "NOT_APPLICABLE", [], trace)

@@ -31,7 +31,7 @@ class RunResult:
 
 
 def run(paths: DatasetPaths, out: Path, trace_dir: Path | None = None, backend: str | None = None,
-        ledger_dir: Path | None = None) -> RunResult:
+        ledger_dir: Path | None = None, workflow_model: Path | None = None, save_model: Path | None = None) -> RunResult:
     from .llm.ledger import Ledger
 
     llm = LLMAdapter(backend=backend, ledger=Ledger(directory=ledger_dir) if ledger_dir else None)
@@ -53,13 +53,20 @@ def run(paths: DatasetPaths, out: Path, trace_dir: Path | None = None, backend: 
     intent = IntentClassifier(llm)
     intents = intent.classify_all([c.request_text for c in cases])
 
-    linker = Linker(store, resolver, activities)
+    model = json.loads(workflow_model.read_text(encoding="utf-8")) if workflow_model and workflow_model.exists() else None
+    linker = Linker(store, resolver, activities, model=model)
     ctx = AuditContext(store, resolver, policy, linker, intents)
     # requests that do not authorize deletion never started a deletion workflow, so they do not compete for one
     competing = [c for c in known.values()
                  if (intents.get(c.request_text) or heuristic(c.request_text)).label == DELETE]
     ctx.prepare(sorted(competing, key=lambda c: loaders.case_sort_key(c.case_id)))
 
+    if model is None:
+        from .engine.linking import learn_lead_range
+        linker.lead_range = learn_lead_range(linker, ctx._items)
+        if save_model is not None:
+            save_model.parent.mkdir(parents=True, exist_ok=True)
+            save_model.write_text(json.dumps(linker.export_model(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     results = [audit_case(c, ctx) for c in cases]
     errors = write_output(results, out, [c.case_id for c in cases])
     if trace_dir is not None:

@@ -25,8 +25,8 @@ MODEL_ALIASES = {
     "fast": ("GDA_MODEL_FAST", "claude-haiku-5-5"),
     "vision": ("GDA_MODEL_VISION", "claude-sonnet-5-5"),
 }
-TASK_ALIAS = {"intent": "fast", "extract_visual": "vision"}
-MAX_TOKENS = {"intent": 4000, "extract_visual": 8000}
+TASK_ALIAS = {"intent": "fast", "extract_visual": "vision", "extract_files": "vision"}
+MAX_TOKENS = {"intent": 4000, "extract_visual": 8000, "extract_files": 4000}
 
 
 @dataclass

@@ -77,6 +77,26 @@ def file_digest(ef: EvidenceFile) -> str:
     return hashlib.sha256(ef.path.read_bytes()).hexdigest()
 
 
+def files_prompt_for(ef: EvidenceFile) -> str:
+    template = (PROMPTS_DIR / "extract_files.md").read_text(encoding="utf-8")
+    return (template.replace("{{file_name}}", ef.path.name).replace("{{origin}}", ef.origin)
+            .replace("{{captured_at}}", ef.captured_at.isoformat().replace("+00:00", "Z")))
+
+
+def file_records(ef: EvidenceFile, payload: dict) -> list[RawRecord]:
+    """Files listed by name only; `file:<name>` is resolved to a resource id through data-catalog links."""
+    out = []
+    for item in (payload or {}).get("files", []):
+        name = str(item.get("file") or "").strip()
+        if not name:
+            continue
+        fields = {"file": name, "result": item.get("result") or "FOUND", "note": item.get("note")}
+        out.append(RawRecord(ef.file_id, ef.captured_at, f"file:{name}", fields,
+                             parse_ts(str(item.get("observed_at") or "")) or ef.captured_at,
+                             "object_storage", "visual", "file_listing", "visual"))
+    return out
+
+
 def extract(ef: EvidenceFile, llm) -> tuple[list[RawRecord], set]:
     if llm is None:
         log.warning("no LLM adapter: skipping visual evidence %s", ef.file_id)
@@ -86,7 +106,13 @@ def extract(ef: EvidenceFile, llm) -> tuple[list[RawRecord], set]:
     if not isinstance(payload, dict):
         log.warning("visual extraction unavailable for %s", ef.file_id)
         return [], set()
-    return records_from_payload(ef, payload), set()
+    records = records_from_payload(ef, payload)
+    if not records:
+        # no resource ids printed: the artifact may list stored files by name (second, cheaper pass)
+        listing = llm.complete(task="extract_files", prompt=files_prompt_for(ef), images=[ef.path], json_schema={"type": "object"})
+        if listing and isinstance(listing.parsed_json, dict):
+            records = file_records(ef, listing.parsed_json)
+    return records, set()
 
 
 def prefetch(manifest: list[EvidenceFile], llm, workers: int = 4) -> None:
