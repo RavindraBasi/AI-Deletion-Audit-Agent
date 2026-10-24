@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-EXCLUDE_DIRS = {"__pycache__", ".venv", "venv", "node_modules", ".git", ".pytest_cache", "ledger"}
+EXCLUDE_DIRS = {"__pycache__", ".runs", ".venv", "venv", "node_modules", ".git", ".pytest_cache", "ledger"}
 EXCLUDE_SUFFIXES = {".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".pyc"}
 EXCLUDE_NAMES = {".env", ".DS_Store", "sample_predictions.csv"}
 
