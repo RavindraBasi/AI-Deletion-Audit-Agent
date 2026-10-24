@@ -44,7 +44,8 @@ class IdentityResolver:
     def __init__(self, identities: list[Identity], audit_log: list[AuditEntry]):
         self.identities = {i.user_id: i for i in identities}
         self.history: dict[str, list[AuditEntry]] = defaultdict(list)
-        for a in sorted(audit_log, key=lambda a: (a.event_time, a.audit_id)):
+        # an entry with an unreadable time keeps its identifiers; it sorts first and never moves a holding
+        for a in sorted(audit_log, key=lambda a: (a.event_time is not None, a.event_time or 0, a.audit_id)):
             self.history[a.user_id].append(a)
         # email -> [(user_id, held_from, held_until)]
         self._email_index: dict[str, set[str]] = defaultdict(set)
@@ -66,7 +67,7 @@ class IdentityResolver:
         current = normalize_email(self.identities[uid].email)
         held = current
         for a in reversed(self.history.get(uid, [])):
-            if a.field_name == "email" and a.event_time > at:
+            if a.field_name == "email" and a.event_time is not None and a.event_time > at:
                 held = normalize_email(a.old_value)
         return held == e or (current == e and not self.history.get(uid))
 
@@ -82,7 +83,7 @@ class IdentityResolver:
             names.add(" ".join(ident.name.lower().split()))
         hist = []
         for a in self.history.get(uid, []):
-            hist.append((a.field_name, a.old_value, a.new_value, a.event_time.isoformat(), a.audit_id))
+            hist.append((a.field_name, a.old_value, a.new_value, a.event_time.isoformat() if a.event_time else None, a.audit_id))
             for v in (a.old_value, a.new_value):
                 kind = {"email": "email", "phone": "phone", "email_hash": "email_hash", "name": "name"}.get(a.field_name)
                 if kind == "name":
