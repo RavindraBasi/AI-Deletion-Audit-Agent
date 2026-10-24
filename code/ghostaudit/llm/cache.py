@@ -9,13 +9,16 @@ from pathlib import Path
 from ..config import CACHE_DIR
 
 
-def cache_key(task: str, model_alias: str, prompt: str, images: list[Path]) -> str:
+def cache_key(task: str, model_alias: str, prompt: str, images: list[Path], variant: str = "") -> str:
+    """`variant` ("backend:model") separates results of non-default backends; empty keeps the original key."""
     h = hashlib.sha256()
     for part in (task, model_alias, prompt):
         h.update(part.encode("utf-8"))
         h.update(b"\x00")
     for img in images:
         h.update(hashlib.sha256(Path(img).read_bytes()).hexdigest().encode())
+    if variant:
+        h.update(b"\x00" + variant.encode("utf-8"))
     return h.hexdigest()
 
 
@@ -32,6 +35,13 @@ class LLMCache:
 
     def get(self, key: str) -> dict | None:
         return self._data.get(key)
+
+    def get_by_base(self, base: str) -> dict | None:
+        """Exact entry for the variant-free key, else the first variant entry recorded for it (sorted by key)."""
+        hit = self._data.get(base)
+        if hit is not None:
+            return hit
+        return next((self._data[k] for k in sorted(self._data) if self._data[k].get("base") == base), None)
 
     def put(self, key: str, record: dict) -> None:
         with self._lock:

@@ -1,8 +1,8 @@
 """Edge-case evaluation dataset: build it, run the pipeline on it and score the result.
 
     python3 code/evaluation/edge_cases.py build          # writes code/evaluation/edge_dataset/
-    python3 code/evaluation/edge_cases.py run            # runs main.py on it (offline backend) and scores
-    python3 code/evaluation/edge_cases.py run --backend claude_cli   # also reads the PNG evidence (paid)
+    python3 code/evaluation/edge_cases.py run            # runs main.py on it (replay: committed cache only) and scores
+    python3 code/evaluation/edge_cases.py run --backend claude_cli   # reads uncached PNG evidence live (paid)
 
 Two participant-shaped datasets are written: `main/` (one shared world, every case in its own 5-day window so a
 full snapshot of one case never asserts absence for another) and `feb29/` (malformed 2026-02-29 timestamps,
@@ -14,6 +14,7 @@ Expected answers are written by hand from the public contract, in the same conve
   needs-vision      - only decidable after the PNG evidence is read (offline runs skip images)
   off-distribution  - format/category absent from the real dataset; informative only
   ambiguous         - the rules do not settle it; the literal reading is recorded, never gated
+  known-limitation  - a documented miss the system does not handle yet (see docs/VISION_SPEC.md §9)
 """
 from __future__ import annotations
 
@@ -455,7 +456,8 @@ def e15_file_listing_link(ds, k):
     ds.request("case_e15", s.email, w.req, w.rep, w.aud, DELETE_TEXTS[0])
     return [Case("case_e15", "File listed by name only",
                  "A storage-browser screenshot lists a file by name; a data-catalog activity maps that name to object_N.",
-                 "Name-to-resource resolution", "needs-vision", ("INCOMPLETE", [
+                 "Name-to-resource resolution (known limitation: the cached local-VLM transcription invents ids, "
+                 "so the file-listing pass never runs)", "known-limitation", ("INCOMPLETE", [
                      F("object_storage", obj, "REPORT_REMAINING_RECORD", ev),
                      R("object_storage", obj, "DELETE_RECORD"),
                      V("account_service", s.acc, "VERIFY_RECORD_ABSENT"),
@@ -776,7 +778,8 @@ def write_cases_md(all_cases: dict[str, list[Case]]) -> None:
              "`python3 code/evaluation/edge_cases.py run`.", "",
              "Labels: **gate** = follows directly from the rules; **needs-vision** = decided by PNG evidence "
              "(offline runs skip images); **off-distribution** = format absent from the real dataset; "
-             "**ambiguous** = rules do not settle it, literal reading recorded.", ""]
+             "**ambiguous** = rules do not settle it, literal reading recorded; **known-limitation** = documented miss "
+             "(docs/VISION_SPEC.md §9).", ""]
     for name, cases in all_cases.items():
         lines += [f"## `{name}/`", "", "| case | title | setup | trap | label | expected |", "|---|---|---|---|---|---|"]
         for c in sorted(cases, key=lambda c: c.cid):
@@ -854,7 +857,7 @@ def run(backend: str) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["build", "run"])
-    ap.add_argument("--backend", default="offline", help="LLM backend for `run` (default offline)")
+    ap.add_argument("--backend", default="replay", help="LLM backend for `run` (default replay)")
     a = ap.parse_args()
     if a.command == "build":
         cases = build()

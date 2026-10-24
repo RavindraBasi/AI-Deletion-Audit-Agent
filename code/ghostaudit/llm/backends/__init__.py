@@ -25,6 +25,9 @@ def get_backend(name: str):
     if name == "anthropic":
         from .anthropic_api import AnthropicBackend
         return AnthropicBackend()
+    if name == "ollama":
+        from .ollama import OllamaBackend
+        return OllamaBackend()
     if name == "openai":
         from .openai_api import OpenAIBackend
         return OpenAIBackend()

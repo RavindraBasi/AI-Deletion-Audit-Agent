@@ -25,6 +25,8 @@ MODEL_ALIASES = {
     "fast": ("GDA_MODEL_FAST", "claude-haiku-5-5"),
     "vision": ("GDA_MODEL_VISION", "claude-sonnet-5-5"),
 }
+# backends whose results are cached under their own key (the original keys belong to the Anthropic models)
+VARIANT_BACKENDS = {"ollama", "openai"}
 TASK_ALIAS = {"intent": "fast", "extract_visual": "vision", "extract_files": "vision"}
 MAX_TOKENS = {"intent": 4000, "extract_visual": 8000, "extract_files": 4000}
 
@@ -84,16 +86,32 @@ class LLMAdapter:
                  json_schema: dict | None = None) -> LLMResult | None:
         images = [Path(i) for i in (images or [])]
         alias, model_id = self.resolve_model(task, model)
-        key = cache_key(task, alias, prompt, images)
+        base = cache_key(task, alias, prompt, images)
+        variant = f"{self.backend_name}:{model_id}" if self.backend_name in VARIANT_BACKENDS else ""
+        key = cache_key(task, alias, prompt, images, variant) if variant else base
         if self.backend_name != "offline":
-            hit = self.cache.get(key)
+            # replay serves the default entry, else any variant recorded for the same request
+            hit = self.cache.get(key) if variant else self.cache.get_by_base(base)
             if hit is not None:
-                self.ledger.record(task=task, model=hit.get("model", model_id), provider=hit.get("provider", ""),
-                                   tokens_in=0, tokens_out=0, cost_usd=0.0, cached=True, key=key)
-                return LLMResult(hit["text"], parse_json(hit["text"]) if json_schema is not None else None,
-                                 {"in": 0, "out": 0}, hit.get("model", model_id), hit.get("provider", ""), True)
+                return self._cached(task, hit, model_id, json_schema)
         if self._backend is None:
             return None
+        result = self._live(task, prompt, images, alias, model_id, json_schema, key, base if variant else "")
+        if result is None and variant:
+            # e.g. a PDF a local vision model cannot read: fall back to what the cache already knows
+            hit = self.cache.get_by_base(base)
+            if hit is not None:
+                return self._cached(task, hit, model_id, json_schema)
+        return result
+
+    def _cached(self, task: str, hit: dict, model_id: str, json_schema) -> LLMResult:
+        self.ledger.record(task=task, model=hit.get("model", model_id), provider=hit.get("provider", ""),
+                           tokens_in=0, tokens_out=0, cost_usd=0.0, cached=True, key=hit["key"])
+        return LLMResult(hit["text"], parse_json(hit["text"]) if json_schema is not None else None,
+                         {"in": 0, "out": 0}, hit.get("model", model_id), hit.get("provider", ""), True)
+
+    def _live(self, task: str, prompt: str, images: list[Path], alias: str, model_id: str, json_schema,
+              key: str, base: str) -> LLMResult | None:
         max_tokens = MAX_TOKENS.get(task, 4000)
         attempts = 2 if json_schema is not None else 1
         for attempt in range(attempts):
@@ -115,8 +133,11 @@ class LLMAdapter:
             if json_schema is not None and parsed is None:
                 log.warning("unparseable JSON from %s (attempt %d)", task, attempt + 1)
                 continue
-            self.cache.put(key, {"task": task, "model": resp.model, "provider": resp.provider, "text": resp.text,
-                                 "tokens_in": resp.tokens_in, "tokens_out": resp.tokens_out, "cost_usd": spent})
+            record = {"task": task, "model": resp.model, "provider": resp.provider, "text": resp.text,
+                      "tokens_in": resp.tokens_in, "tokens_out": resp.tokens_out, "cost_usd": spent}
+            if base:
+                record["base"] = base
+            self.cache.put(key, record)
             return LLMResult(resp.text, parsed, {"in": resp.tokens_in, "out": resp.tokens_out}, resp.model,
                              resp.provider, False, spent)
         return None

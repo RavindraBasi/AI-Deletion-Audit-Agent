@@ -34,6 +34,7 @@ so a clean clone reproduces `output.csv` byte-for-byte with no network access an
 | `claude_cli` | `claude -p --output-format json` with the logged-in Claude subscription (used for development and for producing the cache) | `claude` CLI logged in |
 | `anthropic` | Anthropic Messages API through the official SDK | `pip install anthropic`, `ANTHROPIC_API_KEY` |
 | `openai` | OpenAI Chat Completions through the official SDK | `pip install openai`, `OPENAI_API_KEY`, `GDA_PRICE_OVERRIDE_<ALIAS>="in,out"` |
+| `ollama` | Local models through the Ollama HTTP API (vision: PNG/JPG only; results cached under their own key, Sonnet entries win in replay). Optional, development only | Ollama server (`OLLAMA_HOST`, default `http://127.0.0.1:11434`), a vision model such as `qwen2.5vl:7b` in `GDA_MODEL_VISION` |
 
 Other settings: `GDA_MODEL_FAST` (default `claude-haiku-5-5`, intent), `GDA_MODEL_VISION` (default `claude-sonnet-5-5`,
 PNG/PDF evidence), `GDA_BUDGET_USD` (default `3.00`, `0` = cache only), `GDA_BUDGET_SCOPE` (`total` | `run`),

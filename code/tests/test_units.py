@@ -257,6 +257,27 @@ class LLMTests(unittest.TestCase):
         self.assertEqual((r.tokens_in, r.tokens_out), (3, 4))
         self.assertEqual(content_blocks("p", [])[0]["type"], "text")
 
+    def test_variant_backend_keeps_default_entries_and_replay_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = LLMCache(Path(tmp) / "cache.jsonl")
+            ledger = Ledger(directory=Path(tmp) / "ledger")
+            budget = Budget(ledger, limit_usd=1.0, scope="run")
+            default = LLMAdapter(backend="claude_cli", cache=cache, ledger=ledger, budget=budget, backend_impl=FakeBackend())
+            default.complete(task="t", prompt="seen", json_schema={})
+            local = LLMAdapter(backend="ollama", cache=cache, ledger=ledger, budget=budget, backend_impl=FakeBackend())
+            self.assertFalse(local.complete(task="t", prompt="seen", json_schema={}).cached)  # own key: a real call
+            self.assertFalse(local.complete(task="t", prompt="new", json_schema={}).cached)
+            replay = LLMAdapter(backend="replay", cache=cache, ledger=ledger, budget=budget)
+            self.assertEqual(replay.complete(task="t", prompt="seen", json_schema={}).provider, "fake")
+            self.assertIsNotNone(replay.complete(task="t", prompt="new", json_schema={}))   # variant via base key
+            self.assertEqual(len(cache._data), 3)
+
+    def test_ollama_unreachable_is_unavailable(self):
+        from ghostaudit.llm.backends import BackendUnavailable
+        from ghostaudit.llm.backends.ollama import OllamaBackend
+        with self.assertRaises(BackendUnavailable):
+            OllamaBackend(host="http://127.0.0.1:9")
+
     def test_missing_key_is_clear(self):
         import os
         from ghostaudit.llm.backends import BackendUnavailable
