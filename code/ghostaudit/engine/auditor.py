@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..evidence.records import system_for
 from ..evidence.store import ObservationStore
@@ -16,6 +16,9 @@ from .state import ResourceState, reconstruct
 
 # Systems whose records only need an existence check when inferring absence from a full snapshot.
 IMPLICIT_ABSENCE_TREATMENTS = {"DELETE"}
+# A record last seen this long before the request belongs to an earlier lifecycle (e.g. an earlier request of
+# the same person); it cannot establish anything about this request.
+STALE_BEFORE_REQUEST = timedelta(days=90)
 
 
 @dataclass
@@ -55,6 +58,11 @@ def _implicit_absences(store: ObservationStore, system_id: str, resource_id: str
             out.append(Observation(cov.evidence_id, cov.captured_at, cov.captured_at, system_id, resource_id,
                                    Kind.ABSENT, None, frozenset(), "snapshot", {}, explicit=False))
     return out
+
+
+def _last_seen(observations: list[Observation], audit_at: datetime) -> datetime:
+    seen = [o.captured_at for o in observations if o.captured_at <= audit_at]
+    return max(seen) if seen else datetime.min.replace(tzinfo=audit_at.tzinfo)
 
 
 def _category(observations: list[Observation], audit_at: datetime) -> str | None:
@@ -109,6 +117,8 @@ def audit_case(case: Case, ctx: AuditContext) -> CaseResult:
             if state.kind is None:
                 state = ResourceState(Kind.ABSENT, workflow.activity_id if workflow and rid == account_id else "")
         if state.kind is None:
+            continue
+        if system_id != "account_service" and _last_seen(observations, case.audit_at) < case.requested_at - STALE_BEFORE_REQUEST:
             continue
         state.category = category
         plans.append(ResourcePlan(system_id, rid, decision, state, owned[rid]))
