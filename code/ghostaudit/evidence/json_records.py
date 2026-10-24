@@ -10,7 +10,7 @@ import json
 
 from ..loaders import parse_ts
 from ..models import EvidenceFile
-from .records import RawRecord, system_for
+from .records import NAME_FIELDS, RawRecord, is_null, system_for
 
 SERVICE_KEYS = {
     "account_service", "search_service", "support_platform", "analytics_platform", "export_service",
@@ -25,6 +25,11 @@ def _merge_children(node: dict) -> dict:
     for k, v in node.items():
         if isinstance(v, dict):
             if "resource_id" in v and v.get("resource_id") != node.get("resource_id"):
+                continue
+            if k.lower() in NAME_FIELDS:
+                # a structured name ({"first": .., "last": ..}) is one direct identifier
+                parts = [str(x) for x in v.values() if not isinstance(x, (dict, list)) and not is_null(x)]
+                flat.setdefault(k, " ".join(parts) or None)
                 continue
             for ck, cv in _merge_children(v).items():
                 flat.setdefault(ck, cv)

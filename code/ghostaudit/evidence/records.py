@@ -43,7 +43,10 @@ DIRECT_FIELDS = {
     "phone": "phone", "requester_phone": "phone", "owner_phone": "phone",
     "email_hash": "email_hash",
     "name": "name", "full_name": "name", "display_name": "name", "requester_name": "name",
+    "first_name": "name", "last_name": "name", "given_name": "name", "family_name": "name", "surname": "name",
+    "middle_name": "name",
 }
+NAME_FIELDS = {k for k, v in DIRECT_FIELDS.items() if v == "name"}
 # Fields that only say who the record was looked up for / references (link, not exposure).
 REFERENCE_FIELDS = {
     "lookup_key", "match_key", "subject_key", "subject_ref", "scan_key", "owner_key", "correlation_key",
