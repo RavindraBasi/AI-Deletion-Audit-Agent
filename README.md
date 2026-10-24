@@ -1,5 +1,46 @@
 # HackerRank Orchestrate - October 2026
 
+## Solution: deletion-audit agent
+
+A hybrid agent: a deterministic evidence pipeline does the investigation and planning, and Claude reads only what code cannot — the request's intent (any language) and the application screenshots.
+
+### Setup and run
+
+Requires Python ≥ 3.10 and `pdftotext` (poppler-utils: `apt install poppler-utils` / `brew install poppler`).
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r code/requirements.txt
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env          # never committed; read from the environment
+.venv/bin/python code/main.py                        # → ./output.csv (518 rows, validated)
+.venv/bin/python code/evaluation/main.py --write     # sample + custom-case metrics → code/evaluation/evaluation_report.md
+.venv/bin/python -m pytest code/tests -q             # regression tests
+```
+
+Without a key (or with `--offline`) the agent makes no model calls: request intent comes from a built-in multilingual keyword classifier and the screenshots are skipped, so the resources they evidence fall back to activity citations. The submitted `output.csv` was produced this way; `code/evaluation/usage_report.md` records that run (0 calls) and the budget of a live one. With a key, answers are cached in `code/.llm_cache/`; `--refresh-llm` ignores the cache.
+
+### How it works
+
+```
+dataset/ ─► ingest ─► Observation / Coverage ─► link to subject ─► state at audit_at ─► policy ─► ordered plan ─► output.csv
+             │          (per file, per copy)       tier 1: exact identifiers      (latest post-request observation per copy)
+             │                                     tier 2: deletion-worker trail
+             └─ SQL replicas · JSON bundles/exports/ledgers · 6 log layouts (trace-joined) · TXT · PDF (pdftotext) · PNG (Claude vision)
+```
+
+| Module (`code/audit/`) | Responsibility |
+|---|---|
+| `ingest/` | One parser per evidence family → normalised `Observation` (system, resource, copy, presence, identifier tokens, visible PII, state flags) and `Coverage` (a full collection dump, so absence is provable). Logs are joined on `trace_id` so a lookup key reaches the result line. |
+| `identity.py` | Request email (current or historical) → `user_id` → every email, sha256 email hash, phone and name the person ever had. |
+| `linking.py` | Tier 1: exact identifier matches, scoped to the subject's deletion lifecycle (a person can file several requests). Tier 2: identifier-less resources (404 accounts, anonymised rows) are assigned from the deletion worker's activity trail by a global, exclusive assignment (status↔result agreement, timing, shared evidence files, request-text hints). |
+| `state.py` | Reads only files captured ≤ `audit_at`; a resource violates policy if the latest post-request observation of *any* copy (primary or replica) does. Workflow results are never trusted as proof. |
+| `policy.py` | `deletion_rules.csv` → data category (from the workflow's attempted action, ledger record type, system) → DELETE / REDACT / ANONYMIZE / RETAIN, plus disable-flow and block-restore. |
+| `planner.py` | Findings → remediation → verification, ordered by phase, operation table, `system_id`, `resource_id`; COMPLETE verifications cite the proving evidence. |
+| `intent.py`, `llm/` | Claude Haiku 5.5 classifies all distinct request texts in two batched calls; Claude Sonnet 5.5 transcribes the 11 screenshots. Strict JSON-schema output, thinking off, content-hash cache, usage ledger. Prompts live in `audit/prompts/*.md`. |
+
+Evaluation, custom scenarios and token/cost figures: `code/evaluation/evaluation_report.md` and `code/evaluation/usage_report.md`.
+
+---
+
 ## Ghost Data Still Exists
 
 Build an AI agent that audits whether a user's personal data was actually deleted.
