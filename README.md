@@ -86,7 +86,7 @@ dataset/ ─► loaders ─► IdentityResolver (current + historical email/phon
 | Intent: own 62-text multilingual set + 32 samples (LLM) | 100% accuracy, NON_DELETE recall 100% |
 | Custom end-to-end scenarios | 15 / 15 |
 | Invariants on the 518-case run | contract, citations ≤ audit_at, policy sanity, determinism, identifier invariance, time travel: all pass |
-| LLM cost to build the cache used by the final run | ≈ $2.41 (49 calls), $0 marginal for replay runs |
+| LLM cost to build the cache used by the final run | ≈ $1.37 (34 calls), $0 marginal for replay runs |
 
 ## Repository layout
 

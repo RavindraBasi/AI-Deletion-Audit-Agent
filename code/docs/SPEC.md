@@ -427,11 +427,11 @@ the `openai` backend → visual extraction of images that the samples never cite
 
 | Id | Hypothesis | Result | Evidence |
 |---|---|---|---|
-| H1 | Cite the latest relevant capture ≤ audit_at | _tbd_ | |
-| H2 | Account VERIFY_RECORD_ABSENT is always emitted | _tbd_ | |
-| H3 | resource_id ordering is lexicographic | _tbd_ | |
-| H4 | Contact/marketing analytics → DELETE | _tbd_ | case_12 |
-| H5 | Anonymized analytics stays owned via earlier links | _tbd_ | case_04, case_21 |
+| H1 | Cite the latest relevant capture ≤ audit_at | **Confirmed, refined**: cite the latest *explicit* observation that agrees with the final state; absence inferred from a full snapshot only when nothing explicit exists (case_31 vs case_21). | 97.3% citation accuracy on samples |
+| H2 | Account VERIFY_RECORD_ABSENT is always emitted | **Confirmed** for every DELETE case (32/32). | all samples |
+| H3 | resource_id ordering is lexicographic | **Confirmed**: phase → operation-table index → system_id → resource_id, string compare (case_11/13/23). | unit test `test_ordering_matches_sample_case_11` |
+| H4 | Contact/marketing analytics → DELETE | **Confirmed**: `email_opt_in` / contact lookups are MARKETING_PROFILE → REPORT_REMAINING_RECORD. | case_12 |
+| H5 | Anonymized analytics stays owned via earlier links | **Refuted**: nothing links them by identifier; they are owned through the deletion workflow (learned cadence of successful policy actions after the profile deletion). | case_03/21/25–28 |
 
 ## 11. Non-negotiables
 - Use only `dataset/` participant files. Never read anything outside `dataset/` for predictions. No hardcoded case labels.
