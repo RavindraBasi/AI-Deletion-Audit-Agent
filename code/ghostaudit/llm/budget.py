@@ -37,7 +37,8 @@ class Budget:
     def reserve(self, estimate: float) -> bool:
         """Check-and-reserve atomically. Returns False (fallback) or raises (abort) when over budget."""
         with self._lock:
-            if self.spent() + self._reserved + estimate > self.limit:
+            committed = self.spent() + self._reserved
+            if committed >= self.limit or committed + estimate > self.limit:
                 if self.on_exceed == "abort":
                     raise BudgetExceeded(f"LLM budget ${self.limit:.2f} would be exceeded")
                 return False

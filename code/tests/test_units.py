@@ -1,0 +1,273 @@
+"""Unit tests (stdlib unittest): python3 -m unittest discover -s code/tests -t code"""
+from __future__ import annotations
+
+import json
+import logging
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from ghostaudit import loaders
+from ghostaudit.config import DEFAULT_DATASET_DIR as D
+from ghostaudit.engine.policy import Policy
+from ghostaudit.engine.state import reconstruct
+from ghostaudit.evidence import build_observation_store
+from ghostaudit.evidence.logs import parse_line
+from ghostaudit.identity import IdentityResolver
+from ghostaudit.intent import DELETE, NON_DELETE, heuristic
+from ghostaudit.llm.adapter import LLMAdapter
+from ghostaudit.llm.backends import BackendResponse
+from ghostaudit.llm.backends.anthropic_api import AnthropicBackend, content_blocks
+from ghostaudit.llm.backends.claude_cli import parse_output
+from ghostaudit.llm.budget import Budget, BudgetExceeded
+from ghostaudit.llm.cache import LLMCache
+from ghostaudit.llm.ledger import Ledger
+from ghostaudit.models import Kind, Observation, Step
+from ghostaudit.output import order_steps, steps_to_json, validate_row
+
+logging.disable(logging.WARNING)
+UTC = timezone.utc
+_STORE = None
+
+
+def store():
+    global _STORE
+    if _STORE is None:
+        man = loaders.load_manifest(D / "evidence_files.csv", D)
+        act = loaders.load_activity(D / "system_activity.csv")
+        _STORE = build_observation_store(man, act, LLMAdapter(backend="replay"))
+    return _STORE
+
+
+class OutputTests(unittest.TestCase):
+    def test_ordering_matches_sample_case_11(self):
+        steps = [
+            Step("VERIFICATION", "integration_service", "data_flow_9522", "VERIFY_DATA_FLOW_DISABLED", "DISABLED", ""),
+            Step("REMEDIATION", "analytics_platform", "analytics_2034", "ANONYMIZE_RECORD", "ANONYMIZED", ""),
+            Step("FINDING", "support_platform", "support_864", "REPORT_EXPOSED_PII", "PRESENT", "evidence_03"),
+            Step("FINDING", "search_service", "search_052", "REPORT_REMAINING_RECORD", "PRESENT", "evidence_03"),
+            Step("FINDING", "analytics_platform", "analytics_2034", "REPORT_EXPOSED_PII", "PRESENT", "evidence_03"),
+            Step("REMEDIATION", "integration_service", "data_flow_9522", "DISABLE_DATA_FLOW", "DISABLED", ""),
+            Step("VERIFICATION", "security_service", "audit_record_9394", "VERIFY_RECORD_PRESENT", "PRESENT", ""),
+            Step("VERIFICATION", "account_service", "account_4248", "VERIFY_RECORD_ABSENT", "ABSENT", ""),
+        ]
+        got = [(s.phase[0], s.resource_id) for s in order_steps(steps)]
+        self.assertEqual(got, [("F", "search_052"), ("F", "analytics_2034"), ("F", "support_864"),
+                               ("R", "data_flow_9522"), ("R", "analytics_2034"),
+                               ("V", "account_4248"), ("V", "audit_record_9394"), ("V", "data_flow_9522")])
+
+    def test_serialization_round_trips_sample_rows(self):
+        import csv
+        with open(D / "sample_output.csv", newline="", encoding="utf-8") as fh:
+            for row in list(csv.DictReader(fh))[:3]:
+                steps = [Step(s["phase"], s["system_id"], s["resource_id"], s["operation"], s["state"], s["evidence_id"])
+                         for s in json.loads(row["steps_json"])]
+                self.assertEqual(json.loads(steps_to_json(steps)), json.loads(row["steps_json"]))
+                self.assertEqual(validate_row(row["case_id"], row["deletion_status"], row["steps_json"]), [])
+
+    def test_validator_rejects_malformed(self):
+        bad_state = json.dumps([{"step_no": 1, "phase": "VERIFICATION", "system_id": "a", "resource_id": "b",
+                                 "operation": "VERIFY_RECORD_ABSENT", "state": "PRESENT", "evidence_id": "e"}])
+        self.assertTrue(validate_row("c", "COMPLETE", bad_state))
+        self.assertTrue(validate_row("c", "NOT_APPLICABLE", bad_state))
+        cited_future = json.dumps([
+            {"step_no": 1, "phase": "FINDING", "system_id": "a", "resource_id": "b", "operation": "REPORT_REMAINING_RECORD", "state": "PRESENT", "evidence_id": "e"},
+            {"step_no": 2, "phase": "REMEDIATION", "system_id": "a", "resource_id": "b", "operation": "DELETE_RECORD", "state": "ABSENT", "evidence_id": "e"}])
+        self.assertTrue(validate_row("c", "INCOMPLETE", cited_future))
+        self.assertTrue(validate_row("c", "COMPLETE", "not json"))
+        self.assertEqual(validate_row("c", "NOT_APPLICABLE", "[]"), [])
+
+
+class IdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.r = IdentityResolver(loaders.load_identities(D / "user_identities.csv"), loaders.load_audit_log(D / "user_audit_log.csv"))
+
+    def test_historical_email_resolves_with_hash(self):
+        s = self.r.resolve("minjun.kim@gmail.com")
+        self.assertEqual(s.user_id, "user_12")
+        self.assertIn(("email", "minjun.kim90@gmail.com"), s.identifiers)
+        self.assertIn(("email_hash", loaders.email_hash("minjun.kim90@gmail.com")), s.identifiers)
+        self.assertTrue(loaders.email_hash("minjun.kim90@gmail.com").startswith("44a651"))
+
+    def test_case_insensitive_and_near_miss(self):
+        self.assertEqual(self.r.resolve("SIPHO.MOKOENA@GMAIL.COM").user_id, "user_36")
+        self.assertIsNone(self.r.resolve("g.silva76.jr@gmail.com"))
+
+    def test_every_request_resolves(self):
+        for f in ("deletion_requests.csv", "sample_deletion_requests.csv"):
+            for c in loaders.load_cases(D / f):
+                self.assertIsNotNone(self.r.resolve(c.email, c.requested_at), c.case_id)
+
+
+class EvidenceTests(unittest.TestCase):
+    def kinds(self, rid, eid):
+        return {o.kind for o in store().by_resource(rid) if o.evidence_id == eid}
+
+    def test_golden_facts(self):
+        self.assertIn(Kind.PRESENT, self.kinds("account_005", "evidence_54"))           # failover replica drift
+        self.assertIn(Kind.PRESENT, self.kinds("search_4262", "evidence_94"))           # readback hit
+        obs = [o for o in store().by_resource("analytics_9914") if o.evidence_id == "evidence_01"]
+        self.assertTrue(any(("email_hash", loaders.email_hash("minjun.kim90@gmail.com")) in o.identifiers for o in obs))
+        self.assertEqual(obs[0].category, "MARKETING_PROFILE")
+        self.assertIn(Kind.ABSENT, self.kinds("account_7566", "evidence_94"))
+        self.assertIn(Kind.REDACTED, self.kinds("tombstone_440", "evidence_51"))
+        self.assertIn(Kind.FLOW_ACTIVE, self.kinds("data_flow_9522", "evidence_03"))
+
+    def test_visual_extraction_from_cache(self):
+        recs = [o for o in store().by_resource("support_001") if o.evidence_id == "evidence_58"]
+        self.assertTrue(recs and recs[0].category == "SUPPORT_ATTACHMENT")
+        self.assertIn(("email", "priya.raman@gmail.com"), recs[0].identifiers)
+
+    def test_no_structured_file_is_unparsed(self):
+        for fid, rep in store().report.items():
+            if fid.startswith("evidence_") and not rep["path"].endswith((".png", ".pdf")):
+                self.assertGreater(rep.get("records", 0) + len(rep.get("coverage", [])), 0, rep)
+
+    def test_log_formats(self):
+        cloud = ('2026-06-08T09:52:27Z requestId=tr-1 level=DEBUG function=security_service message="instance=\\"s\\" '
+                 'resource_id=\\"audit_record_1\\" event=\\"audit_record_read_completed\\" rows=\\"1\\""')
+        f = parse_line(cloud)
+        self.assertEqual((f["resource_id"], f["rows"], f["trace_id"], f["service"]), ("audit_record_1", "1", "tr-1", "security_service"))
+        pipe = '2026-07-03T07:51:32Z | DEBUG | security_service | tr-5 | audit_record_read_completed | resource_id="audit_record_2" rows="1"'
+        self.assertEqual(parse_line(pipe)["event"], "audit_record_read_completed")
+        sysl = '2026-03-25T08:51:15Z <15>1 node-1 support_platform tr-7 - - level=DEBUG event="message_scan_started" subject_key="a@b.co"'
+        self.assertEqual(parse_line(sysl)["subject_key"], "a@b.co")
+
+
+class StateTests(unittest.TestCase):
+    def obs(self, eid, t, kind, explicit=True):
+        return Observation(eid, t, t, "search_service", "search_1", kind, None, frozenset(), "", {}, explicit)
+
+    def test_future_observation_is_ignored(self):
+        t0 = datetime(2026, 5, 1, tzinfo=UTC)
+        o = [self.obs("e1", t0, Kind.ABSENT), self.obs("e2", t0 + timedelta(days=3), Kind.PRESENT)]
+        st = reconstruct(o, t0 + timedelta(days=1))
+        self.assertEqual((st.kind, st.evidence_id), (Kind.ABSENT, "e1"))
+
+    def test_latest_wins_and_explicit_is_cited(self):
+        t0 = datetime(2026, 5, 1, tzinfo=UTC)
+        o = [self.obs("e1", t0, Kind.PRESENT), self.obs("e2", t0 + timedelta(days=1), Kind.ABSENT),
+             self.obs("e3", t0 + timedelta(days=2), Kind.ABSENT, explicit=False)]
+        st = reconstruct(o, t0 + timedelta(days=5))
+        self.assertEqual((st.kind, st.evidence_id), (Kind.ABSENT, "e2"))
+
+    def test_recreation_after_deletion(self):
+        t0 = datetime(2026, 5, 1, tzinfo=UTC)
+        o = [self.obs("e1", t0, Kind.ABSENT), self.obs("activity_9", t0 + timedelta(days=1), Kind.RECREATED)]
+        self.assertEqual(reconstruct(o, t0 + timedelta(days=2)).kind, Kind.PRESENT)
+
+
+class PolicyTests(unittest.TestCase):
+    def test_retention(self):
+        p = Policy(loaders.load_rules(D / "deletion_rules.csv"))
+        at = datetime(2026, 9, 1, tzinfo=UTC)
+        self.assertEqual(p.decide("security_service", "SECURITY_AUDIT_LOG", {"retention_until": "2031-01-01T00:00:00Z"}, at).treatment, "RETAIN")
+        self.assertEqual(p.decide("security_service", "SECURITY_AUDIT_LOG", {"retention_until": "2026-01-01T00:00:00Z"}, at).treatment, "DELETE")
+        self.assertEqual(p.decide("identity_service", None, {}, at).treatment, "REDACT")
+        self.assertEqual(p.decide("analytics_platform", "MARKETING_PROFILE", {}, at).treatment, "DELETE")
+        self.assertEqual(p.decide("backup_service", None, {}, at).treatment, "BLOCK_RESTORE")
+
+
+class IntentTests(unittest.TestCase):
+    def test_heuristic_on_eval_texts(self):
+        cases = loaders.load_cases(D / "deletion_requests.csv") + loaders.load_cases(D / "sample_deletion_requests.csv")
+        non = {c.case_id for c in cases if heuristic(c.request_text).label == NON_DELETE}
+        self.assertEqual(non, {f"case_{i}" for i in range(533, 543)})
+
+    def test_mixed_and_multilingual(self):
+        self.assertEqual(heuristic("Please export my data and then delete my account.").label, DELETE)
+        self.assertEqual(heuristic("이 이메일 주소에 연결된 계정의 영구 삭제를 요청합니다.").label, DELETE)
+        self.assertEqual(heuristic("Please remove me from marketing lists only.").label, NON_DELETE)
+
+
+class FakeBackend:
+    provider = "fake"
+
+    def __init__(self):
+        self.calls = 0
+
+    def call(self, prompt, images, model, max_tokens):
+        self.calls += 1
+        return BackendResponse('{"ok": true}', 1000, 100, model, self.provider, cost_usd=0.01)
+
+
+class LLMTests(unittest.TestCase):
+    def adapter(self, tmp, limit, on_exceed="fallback", backend=None):
+        ledger = Ledger(directory=Path(tmp) / "ledger")
+        return LLMAdapter(backend="claude_cli", cache=LLMCache(Path(tmp) / "cache.jsonl"), ledger=ledger,
+                          budget=Budget(ledger, limit_usd=limit, scope="run", on_exceed=on_exceed),
+                          backend_impl=backend or FakeBackend())
+
+    def test_budget_fallback_and_cache_is_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = FakeBackend()
+            a = self.adapter(tmp, 0.01, backend=fake)
+            a.budget.estimate = lambda *args: 0.0
+            self.assertIsNotNone(a.complete(task="t", prompt="one", json_schema={}))
+            self.assertIsNone(a.complete(task="t", prompt="two", json_schema={}))   # spent 0.01 -> over budget
+            hit = a.complete(task="t", prompt="one", json_schema={})                 # cache hit costs nothing
+            self.assertTrue(hit.cached)
+            self.assertEqual(fake.calls, 1)
+
+    def test_budget_abort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.adapter(tmp, 0.0, on_exceed="abort")
+            with self.assertRaises(BudgetExceeded):
+                a.complete(task="t", prompt="x", json_schema={})
+            self.assertEqual(BudgetExceeded.exit_code, 3)
+
+    def test_total_scope_sums_previous_ledgers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "ledger"
+            d.mkdir()
+            (d / "old.jsonl").write_text(json.dumps({"cost_usd": 2.5, "cached": False}) + "\n")
+            b = Budget(Ledger(directory=d), limit_usd=3.0, scope="total")
+            self.assertAlmostEqual(b.spent(), 2.5)
+            self.assertFalse(b.reserve(1.0))
+
+    def test_claude_cli_output_parsing(self):
+        out = json.dumps({"result": '{"a":1}', "total_cost_usd": 0.02, "usage": {"input_tokens": 5,
+                          "cache_read_input_tokens": 10, "output_tokens": 7}, "modelUsage": {"claude-haiku-5-5": {}}})
+        r = parse_output(out, "x", "p")
+        self.assertEqual((r.tokens_in, r.tokens_out, r.model, r.cost_usd), (15, 7, "claude-haiku-5-5", 0.02))
+
+    def test_anthropic_request_shape_with_mock(self):
+        class Msg:
+            content = [type("B", (), {"type": "text", "text": '{"x": 1}'})()]
+            usage = type("U", (), {"input_tokens": 3, "output_tokens": 4})()
+
+        class Client:
+            def __init__(self):
+                self.kw = None
+                self.messages = self
+
+            def create(self, **kw):
+                self.kw = kw
+                return Msg()
+
+        c = Client()
+        with tempfile.NamedTemporaryFile(suffix=".png") as img:
+            img.write(b"\x89PNG")
+            img.flush()
+            r = AnthropicBackend(client=c).call("hi", [Path(img.name)], "claude-sonnet-5-5", 100)
+        blocks = c.kw["messages"][0]["content"]
+        self.assertEqual([b["type"] for b in blocks], ["image", "text"])
+        self.assertNotIn("temperature", c.kw)
+        self.assertEqual((r.tokens_in, r.tokens_out), (3, 4))
+        self.assertEqual(content_blocks("p", [])[0]["type"], "text")
+
+    def test_missing_key_is_clear(self):
+        import os
+        from ghostaudit.llm.backends import BackendUnavailable
+        saved = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            with self.assertRaises(BackendUnavailable):
+                AnthropicBackend()
+        finally:
+            if saved is not None:
+                os.environ["ANTHROPIC_API_KEY"] = saved
+
+
+if __name__ == "__main__":
+    unittest.main()
