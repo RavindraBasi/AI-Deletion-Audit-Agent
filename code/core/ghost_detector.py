@@ -31,6 +31,22 @@ class Finding:
         }
 
 
+def is_identifier_matched(id_str: str, text: str) -> bool:
+    """Precise identifier matching avoiding partial substring false positives on dates/numbers."""
+    if not id_str or len(id_str.strip()) < 3:
+        return False
+    id_clean = id_str.strip().lower()
+    text_clean = text.lower()
+
+    # Emails and hashes (exact string search)
+    if "@" in id_clean or len(id_clean) >= 32:
+        return id_clean in text_clean
+    else:
+        # Word boundary search for user_id, phone numbers, etc.
+        pattern = r"\b" + re.escape(id_clean) + r"\b"
+        return bool(re.search(pattern, text_clean))
+
+
 class GhostDetector:
     def __init__(
         self,
@@ -79,10 +95,8 @@ class GhostDetector:
                 event_type = str(row.get("event_type", ""))
                 activity_id = str(row.get("activity_id", ""))
                 source_sys = str(row.get("source_system", ""))
-                target_sys = str(row.get("target_system", ""))
 
-                # Check identifier match in details or resource_id
-                matched_ids = [id_str for id_str in identifiers if id_str.lower() in details.lower() or id_str.lower() in resource_id.lower()]
+                matched_ids = [id_str for id_str in identifiers if is_identifier_matched(id_str, details) or is_identifier_matched(id_str, resource_id)]
                 if not matched_ids:
                     continue
 
@@ -126,7 +140,6 @@ class GhostDetector:
                 file_id = str(row.get("file_id", ""))
                 file_path_str = str(row.get("file_path", ""))
 
-                # Correct path resolution: check DATASET_DIR first
                 p1 = config.DATASET_DIR / file_path_str
                 p2 = config.BASE_DIR / file_path_str
                 file_path = p1 if p1.exists() else (p2 if p2.exists() else None)
@@ -157,7 +170,6 @@ class GhostDetector:
         findings = []
         suffix = file_path.suffix.lower()
 
-        # Handle JSON files
         if suffix == ".json":
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -166,7 +178,6 @@ class GhostDetector:
             except Exception:
                 pass
 
-        # Handle SQL / LOG / TXT / CSV files
         elif suffix in (".sql", ".log", ".txt", ".csv"):
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -187,9 +198,8 @@ class GhostDetector:
                 sys_id = obj.get("data_store") or obj.get("source") or obj.get("origin") or current_system
                 res_id = obj.get("resource_id") or current_resource
 
-                # Check if this node contains identifiers
                 obj_str = json.dumps(obj)
-                matched = [i for i in identifiers if i.lower() in obj_str.lower()]
+                matched = [i for i in identifiers if is_identifier_matched(i, obj_str)]
 
                 if matched and res_id:
                     finding_type = self._determine_finding_type(obj_str, matched, sys_id or "system_service")
@@ -222,24 +232,20 @@ class GhostDetector:
         lines = content.splitlines()
 
         for line in lines:
-            line_lower = line.lower()
-            matched = [i for i in identifiers if i.lower() in line_lower]
+            matched = [i for i in identifiers if is_identifier_matched(i, line)]
             if not matched:
                 continue
 
-            # Extract system_id
             sys_id = None
             m_sys = re.search(r"service=([a-zA-Z0-9_]+)", line)
             if m_sys:
                 sys_id = m_sys.group(1)
 
-            # Extract resource_id
             res_id = None
             m_res = re.search(r"resource_id=([a-zA-Z0-9_]+)", line)
             if m_res:
                 res_id = m_res.group(1)
             else:
-                # Look for SQL VALUES ('resource_id', ...) or resource_id in quotes
                 m_sql = re.search(r"VALUES\s*\(\s*'([a-zA-Z0-9_]+)'", line)
                 if m_sql:
                     res_id = m_sql.group(1)

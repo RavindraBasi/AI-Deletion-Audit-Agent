@@ -17,11 +17,11 @@ class UserIdentity:
     is_tombstone: bool = False
 
     def all_identifiers(self) -> Set[str]:
-        """Return all non-empty string identifiers associated with the user."""
+        """Return all unique direct identifiers associated with the user."""
         all_ids = set()
         if self.user_id:
             all_ids.add(str(self.user_id).strip())
-        for collection in (self.names, self.emails, self.phones, self.email_hashes, self.other_identifiers):
+        for collection in (self.emails, self.phones, self.email_hashes, self.other_identifiers):
             for val in collection:
                 if val and str(val).strip():
                     all_ids.add(str(val).strip())
@@ -64,7 +64,7 @@ class IdentifierResolver:
     def resolve(self, initial_identifier: str) -> UserIdentity:
         """
         Reconstruct complete UserIdentity footprint given an initial identifier.
-        Uses an iterative recursive search over identities and audit log.
+        Uses exact unique identifier matching (excluding non-unique names from multi-user merging).
         """
         identity = UserIdentity()
         if not initial_identifier:
@@ -79,10 +79,10 @@ class IdentifierResolver:
             identity.other_identifiers.add(initial_identifier.strip())
 
         changed = True
-        max_depth = 10
+        max_depth = 5
         depth = 0
 
-        # Iterative recursive expansion until fixed point
+        # Iterative recursive expansion on unique keys (user_id, email, phone, email_hash)
         while changed and depth < max_depth:
             changed = False
             depth += 1
@@ -94,21 +94,21 @@ class IdentifierResolver:
                     email = str(row.get("email", "")).strip()
                     phone = str(row.get("phone", "")).strip()
                     email_hash = str(row.get("email_hash", "")).strip()
-                    name = str(row.get("name", "")).strip()
 
-                    row_vals = {
+                    # Only match unique identifiers (NOT names) to avoid cross-user pollution
+                    row_unique_vals = {
                         v.lower()
-                        for v in (uid, email, phone, email_hash, name)
+                        for v in (uid, email, phone, email_hash)
                         if v and v.lower() not in ("nan", "none", "", "[redacted]")
                     }
 
-                    if known_targets.intersection(row_vals):
+                    if known_targets.intersection(row_unique_vals):
                         if uid and uid.lower() not in ("nan", "none", "", "[redacted]"):
                             if uid not in matched_user_ids:
                                 matched_user_ids.add(uid)
                                 changed = True
 
-                        for val in (email, phone, email_hash, name, uid):
+                        for val in (email, phone, email_hash, uid):
                             if val and val.lower() not in ("nan", "none", "", "[redacted]"):
                                 val_lower = val.lower()
                                 if val_lower not in known_targets:
@@ -121,15 +121,14 @@ class IdentifierResolver:
                     uid = str(row.get("user_id", "")).strip()
                     old_val = str(row.get("old_value", "")).strip()
                     new_val = str(row.get("new_value", "")).strip()
-                    field_name = str(row.get("field_name", "")).strip().lower()
 
-                    row_vals = {
+                    row_unique_vals = {
                         v.lower()
                         for v in (uid, old_val, new_val)
                         if v and v.lower() not in ("nan", "none", "", "[redacted]")
                     }
 
-                    if known_targets.intersection(row_vals):
+                    if known_targets.intersection(row_unique_vals):
                         if uid and uid.lower() not in ("nan", "none", "", "[redacted]"):
                             if uid not in matched_user_ids:
                                 matched_user_ids.add(uid)
