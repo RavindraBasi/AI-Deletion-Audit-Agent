@@ -1,0 +1,127 @@
+"""LLMAdapter: cache -> budget -> backend -> ledger. Backends: claude_cli | anthropic | openai | replay | offline.
+
+`replay` and `offline` never touch the network: replay serves the committed cache, offline ignores it so
+every caller uses its deterministic heuristic.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ..config import llm_backend
+from .backends import BackendUnavailable, get_backend
+from .budget import Budget
+from .cache import LLMCache, cache_key
+from .ledger import Ledger
+from .pricing import cost as price_cost
+
+log = logging.getLogger(__name__)
+
+MODEL_ALIASES = {
+    "fast": ("GDA_MODEL_FAST", "claude-haiku-5-5"),
+    "vision": ("GDA_MODEL_VISION", "claude-sonnet-5-5"),
+}
+TASK_ALIAS = {"intent": "fast", "extract_visual": "vision"}
+MAX_TOKENS = {"intent": 4000, "extract_visual": 8000}
+
+
+@dataclass
+class LLMResult:
+    text: str
+    parsed_json: object
+    usage: dict
+    model: str
+    provider: str
+    cached: bool
+    cost_usd: float = 0.0
+    extra: dict = field(default_factory=dict)
+
+
+def parse_json(text: str):
+    t = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", t, re.S)
+    if fence:
+        t = fence.group(1).strip()
+    for opener, closer in (("{", "}"), ("[", "]")):
+        i, j = t.find(opener), t.rfind(closer)
+        if i != -1 and j > i:
+            try:
+                return json.loads(t[i:j + 1])
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+class LLMAdapter:
+    def __init__(self, backend: str | None = None, cache: LLMCache | None = None, ledger: Ledger | None = None,
+                 budget: Budget | None = None, backend_impl=None):
+        self.backend_name = backend or llm_backend()
+        self.cache = cache or LLMCache()
+        self.ledger = ledger or Ledger()
+        self.budget = budget or Budget(self.ledger)
+        self._backend = backend_impl
+        self._backend_error = None
+        if self._backend is None and self.backend_name not in {"replay", "offline"}:
+            try:
+                self._backend = get_backend(self.backend_name)
+            except BackendUnavailable as exc:
+                self._backend_error = str(exc)
+                log.warning("LLM backend %s unavailable (%s): using cache/offline only", self.backend_name, exc)
+
+    @staticmethod
+    def resolve_model(task: str, model: str | None) -> tuple[str, str]:
+        alias = model or TASK_ALIAS.get(task, "fast")
+        if alias in MODEL_ALIASES:
+            env_name, default = MODEL_ALIASES[alias]
+            return alias, os.environ.get(env_name, default)
+        return alias, alias
+
+    def complete(self, *, task: str, prompt: str, images: list[Path] | None = None, model: str | None = None,
+                 json_schema: dict | None = None) -> LLMResult | None:
+        images = [Path(i) for i in (images or [])]
+        alias, model_id = self.resolve_model(task, model)
+        key = cache_key(task, alias, prompt, images)
+        if self.backend_name != "offline":
+            hit = self.cache.get(key)
+            if hit is not None:
+                self.ledger.record(task=task, model=hit.get("model", model_id), provider=hit.get("provider", ""),
+                                   tokens_in=0, tokens_out=0, cost_usd=0.0, cached=True, key=key)
+                return LLMResult(hit["text"], parse_json(hit["text"]) if json_schema is not None else None,
+                                 {"in": 0, "out": 0}, hit.get("model", model_id), hit.get("provider", ""), True)
+        if self._backend is None:
+            return None
+        max_tokens = MAX_TOKENS.get(task, 4000)
+        attempts = 2 if json_schema is not None else 1
+        for attempt in range(attempts):
+            estimate = self.budget.estimate(model_id, alias, prompt, len(images), max_tokens)
+            if not self.budget.reserve(estimate):
+                log.warning("LLM budget exhausted: %s falls back", task)
+                return None
+            try:
+                resp = self._backend.call(prompt, images, model_id, max_tokens)
+            except Exception as exc:  # network / CLI failure -> fallback, never crash the run
+                log.warning("LLM call failed for %s: %s", task, exc)
+                self.budget.release(estimate)
+                return None
+            self.budget.release(estimate)
+            spent = resp.cost_usd if resp.cost_usd is not None else price_cost(resp.model, resp.tokens_in, resp.tokens_out, alias)
+            self.ledger.record(task=task, model=resp.model, provider=resp.provider, tokens_in=resp.tokens_in,
+                               tokens_out=resp.tokens_out, cost_usd=spent, cached=False, key=key, attempt=attempt)
+            parsed = parse_json(resp.text) if json_schema is not None else None
+            if json_schema is not None and parsed is None:
+                log.warning("unparseable JSON from %s (attempt %d)", task, attempt + 1)
+                continue
+            self.cache.put(key, {"task": task, "model": resp.model, "provider": resp.provider, "text": resp.text,
+                                 "tokens_in": resp.tokens_in, "tokens_out": resp.tokens_out, "cost_usd": spent})
+            return LLMResult(resp.text, parsed, {"in": resp.tokens_in, "out": resp.tokens_out}, resp.model,
+                             resp.provider, False, spent)
+        return None
+
+    def spend_line(self) -> str:
+        s = self.ledger.summary()
+        return (f"LLM spend: ${self.budget.spent():.2f} / ${self.budget.limit:.2f} "
+                f"({s['live_calls']} live calls, {s['cache_hits']} cache hits) backend={self.backend_name}")
