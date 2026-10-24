@@ -166,18 +166,20 @@ class Linker:
         return votes
 
     def workflow_candidates(self, case: Case, subject: Subject, direct: dict[str, set[str]],
-                            lead_range: tuple[float, float] | None = None) -> list[tuple[float, Activity]]:
-        lo, hi = case.requested_at, min(case.reported_at + REPORT_SLACK, case.audit_at)
+                            lead_range: tuple[float, float] | None = None,
+                            cutoff: datetime | None = None) -> list[tuple[float, Activity]]:
+        as_of = min(case.audit_at, cutoff) if cutoff else case.audit_at
+        lo, hi = case.requested_at, min(case.reported_at + REPORT_SLACK, as_of)
         uid = subject.user_id
         scored = []
         for acc in self.profile_deletions:
             if not (lo <= acc.event_time <= hi):
                 continue
-            owners = self.owners(acc.resource_id, case.audit_at)
+            owners = self.owners(acc.resource_id, as_of)
             if owners and uid not in owners:
                 continue
             score = 100.0 if uid in owners else 0.0
-            votes = self.chain_owners(acc, case.audit_at)
+            votes = self.chain_owners(acc, as_of)
             mine = votes.get(uid, 0)
             others = sum(n for u, n in votes.items() if u != uid)
             if mine:
@@ -187,14 +189,14 @@ class Linker:
             # the subject's earliest identifiable step of each class must sit on the chain's first-step phase
             for cls in ("policy", "result"):
                 phases = self.first_phase.get(cls)
-                own = [st for st in self._following(acc) if st.event_time <= case.audit_at
+                own = [st for st in self._following(acc) if st.event_time <= as_of
                        and self.step_class(st) == cls and st.resource_id in direct]
                 if phases and own:
                     ok = int((own[0].event_time - acc.event_time).total_seconds()) % 60 in phases
                     score += 15.0 if ok else -15.0
             # a post-deletion readback of exactly this account before the audit is corroborating evidence
-            if any(o.explicit and o.location != "activity" and case.reported_at <= o.captured_at <= case.audit_at
-                   and case.audit_at - o.captured_at <= READBACK_WINDOW for o in self.store.by_resource(acc.resource_id)):
+            if any(o.explicit and o.location != "activity" and case.reported_at <= o.captured_at <= as_of
+                   and as_of - o.captured_at <= READBACK_WINDOW for o in self.store.by_resource(acc.resource_id)):
                 score += 8.0
             lead = (case.reported_at - acc.event_time).total_seconds() / 60.0
             if lead_range and lead_range[0] <= lead <= lead_range[1]:
@@ -248,13 +250,19 @@ def learn_lead_range(linker: Linker, items) -> tuple[float, float] | None:
     return leads[int(0.05 * (len(leads) - 1))], leads[int(0.95 * (len(leads) - 1))]
 
 
-def assign_workflows(linker: Linker, items: list[tuple[Case, Subject, dict]]) -> dict[str, Activity | None]:
-    """Global one-to-one assignment of profile-deletion workflows to cases.
+def assign_workflows(linker: Linker, items: list[tuple[Case, Subject, dict]],
+                     cutoff: datetime | None = None) -> dict[str, Activity | None]:
+    """Global one-to-one assignment of profile-deletion workflows to cases, using only evidence and activity
+    available at `cutoff` (so eliminating a workflow never relies on facts newer than the audited case).
 
-    Forced choices (a single candidate) are made first, then the strongest-scored ones; each assignment removes
-    that workflow from every other case's candidates, so ambiguity is resolved by elimination."""
-    linker.lead_range = learn_lead_range(linker, items)
-    cand = {c.case_id: linker.workflow_candidates(c, s, d, linker.lead_range) for c, s, d in items}
+    Forced choices (a single candidate) are made first, then the most decisive ones (largest lead over the
+    runner-up); each assignment removes that workflow from every other case's candidates."""
+    if linker.lead_range is None:
+        linker.lead_range = learn_lead_range(linker, items)
+    if cutoff is not None:
+        items = [(c, s, linker.direct_resources(s, min(c.audit_at, cutoff)) if c.audit_at > cutoff else d)
+                 for c, s, d in items if c.requested_at <= cutoff]
+    cand = {c.case_id: linker.workflow_candidates(c, s, d, linker.lead_range, cutoff) for c, s, d in items}
     assigned: dict[str, Activity | None] = {}
     taken: set[str] = set()
     pending = dict(cand)

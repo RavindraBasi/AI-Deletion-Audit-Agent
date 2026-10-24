@@ -13,7 +13,7 @@ from .engine.linking import Linker
 from .engine.policy import Policy
 from .evidence import build_observation_store, multimodal
 from .identity import IdentityResolver
-from .intent import IntentClassifier
+from .intent import DELETE, IntentClassifier, heuristic
 from .llm.adapter import LLMAdapter
 from .models import CaseResult
 from .output import write_output
@@ -55,7 +55,10 @@ def run(paths: DatasetPaths, out: Path, trace_dir: Path | None = None, backend: 
 
     linker = Linker(store, resolver, activities)
     ctx = AuditContext(store, resolver, policy, linker, intents)
-    ctx.prepare(sorted(known.values(), key=lambda c: loaders.case_sort_key(c.case_id)))
+    # requests that do not authorize deletion never started a deletion workflow, so they do not compete for one
+    competing = [c for c in known.values()
+                 if (intents.get(c.request_text) or heuristic(c.request_text)).label == DELETE]
+    ctx.prepare(sorted(competing, key=lambda c: loaders.case_sort_key(c.case_id)))
 
     results = [audit_case(c, ctx) for c in cases]
     errors = write_output(results, out, [c.case_id for c in cases])

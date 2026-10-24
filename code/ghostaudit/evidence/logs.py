@@ -12,7 +12,7 @@ from collections import OrderedDict
 
 from ..loaders import parse_ts
 from ..models import EvidenceFile
-from .records import RawRecord, system_for
+from .records import REFERENCE_FIELDS, RawRecord, system_for
 
 KV_RE = re.compile(r'([A-Za-z_][\w.]*)=("(?:[^"\\]|\\.)*"|\S+)')
 BRACKET_RE = re.compile(r"^\[(?P<level>\w+)\]\s+\[(?P<service>[\w.-]+)\]\s+\[(?P<trace>[\w.-]+)\]\s+(?P<event>\w+):")
@@ -79,11 +79,13 @@ def extract(ef: EvidenceFile) -> tuple[list[RawRecord], set[tuple[str, str]]]:
     records: list[RawRecord] = []
     for key, group in groups.items():
         rids = list(dict.fromkeys(f["resource_id"] for f in group if f.get("resource_id")))
+        # lines without a resource (lookup started, cache/connection noise) only contribute who was looked up;
+        # their own result fields (e.g. a cache "miss") say nothing about the resource
         shared = {}
         for f in group:
             if not f.get("resource_id"):
                 for k, v in f.items():
-                    if v is not None or k not in shared:
+                    if (k in REFERENCE_FIELDS or k in {"service", "trace_id"}) and (v is not None or k not in shared):
                         shared[k] = v
         for rid in rids:
             merged = dict(shared)

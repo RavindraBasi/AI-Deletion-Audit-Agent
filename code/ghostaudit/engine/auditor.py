@@ -37,7 +37,15 @@ class AuditContext:
             self.subjects[c.case_id] = s
             self.direct[c.case_id] = self.linker.direct_resources(s, c.audit_at)
             items.append((c, s, self.direct[c.case_id]))
-        self.workflows = assign_workflows(self.linker, items)
+        self._items = items
+        self._by_cutoff: dict = {}
+
+    def workflow_for(self, case: Case) -> Activity | None:
+        """The deletion workflow of `case`, from an assignment computed with information up to its audit_at."""
+        key = case.audit_at
+        if key not in self._by_cutoff:
+            self._by_cutoff[key] = assign_workflows(self.linker, self._items, cutoff=key)
+        return self._by_cutoff[key].get(case.case_id)
 
 
 def _implicit_absences(store: ObservationStore, system_id: str, resource_id: str, audit_at: datetime) -> list[Observation]:
@@ -73,7 +81,7 @@ def audit_case(case: Case, ctx: AuditContext) -> CaseResult:
     trace["subject"] = {"user_id": subject.user_id, "identifiers": sorted(f"{k}:{v}" for k, v in subject.identifiers)}
 
     owned: dict[str, str] = {rid: "identifier" for rid in direct}
-    workflow = ctx.workflows.get(case.case_id)
+    workflow = ctx.workflow_for(case)
     account_id = None
     if workflow is not None:
         account_id = workflow.resource_id
