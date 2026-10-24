@@ -37,6 +37,7 @@ Labels: **gate** = follows directly from the rules; **needs-vision** = decided b
 | case_e28 | Withdrawn deletion request | Request text: “Last week I asked you to delete my account. Please cancel that request; I want to keep my account and my data.” | Mentions deletion but withdraws it | gate | **NOT_APPLICABLE**: no steps |
 | case_e29 | Conditional request | Request text: “If you cannot fix the delivery address on order ORD-55120 by Friday, then delete my account.” | Deletion only if a condition fails | ambiguous | **NOT_APPLICABLE**: no steps |
 | case_e30 | On behalf of someone else | Request text: “I am writing for my mother, who passed away in March. Please close and delete her account registered to this email.” | Third party asks for deletion | ambiguous | **COMPLETE**: record_absent account_8321 |
+| case_e31 | Authorized deletion, no footprint | Known subject asks for deletion; no evidence file or activity mentions any of their identifiers. | NOT_APPLICABLE is only for non-deletion requests | gate | **COMPLETE**: no steps |
 
 ## `feb29/`
 

@@ -81,8 +81,8 @@ def validate_row(case_id: str, status: str, steps_json: str) -> list[str]:
         return errors + [f"{case_id}: steps_json is not an array"]
     if status == "NOT_APPLICABLE" and steps:
         errors.append(f"{case_id}: NOT_APPLICABLE must have []")
-    if status != "NOT_APPLICABLE" and not steps:
-        errors.append(f"{case_id}: {status} must have steps")
+    if status == "INCOMPLETE" and not steps:
+        errors.append(f"{case_id}: INCOMPLETE must have steps")
     last_phase = 0
     for i, s in enumerate(steps, start=1):
         if not isinstance(s, dict) or sorted(s.keys()) != sorted(STEP_KEYS):

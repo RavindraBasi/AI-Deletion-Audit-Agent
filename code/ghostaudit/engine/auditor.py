@@ -1,6 +1,7 @@
 """audit_case(case, ctx) -> CaseResult: the per-case decision procedure of SPEC §5."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -13,6 +14,8 @@ from .linking import Linker, assign_workflows
 from .planner import ResourcePlan, build_steps
 from .policy import Policy
 from .state import ResourceState, reconstruct
+
+log = logging.getLogger(__name__)
 
 # Systems whose records only need an existence check when inferring absence from a full snapshot.
 IMPLICIT_ABSENCE_TREATMENTS = {"DELETE"}
@@ -140,9 +143,9 @@ def _no_resource(case: Case, ctx: AuditContext, subject: Subject, direct: dict, 
     """Defined behaviour when no resource of the subject is observable at audit_at.
 
     The best-scoring profile deletion in the request window (even if another request also claims it) is the
-    only footprint left: its account is verified ABSENT citing that deletion event. With no workflow at all
-    there is nothing to audit, and the case is reported NOT_APPLICABLE with the reason in the trace (a COMPLETE
-    row needs cited proof and an INCOMPLETE row needs a cited finding, neither of which exists)."""
+    only footprint left: its account is verified ABSENT citing that deletion event. With no workflow at all the
+    deletion was still authorized and nothing remains according to the evidence, so the case is COMPLETE with no
+    steps (there is no proof to cite). NOT_APPLICABLE is reserved for requests that do not authorize deletion."""
     cands = ctx.linker.workflow_candidates(case, subject, direct, ctx.linker.lead_range, case.audit_at)
     if cands:
         acc = cands[0][1]
@@ -150,4 +153,5 @@ def _no_resource(case: Case, ctx: AuditContext, subject: Subject, direct: dict, 
         steps = [Step("VERIFICATION", "account_service", acc.resource_id, "VERIFY_RECORD_ABSENT", "ABSENT", acc.activity_id)]
         return CaseResult(case.case_id, "COMPLETE", steps, trace)
     trace["note"] = "no observable resource and no deletion workflow for the subject"
-    return CaseResult(case.case_id, "NOT_APPLICABLE", [], trace)
+    log.warning("%s: authorized deletion with no observable footprint; COMPLETE without steps", case.case_id)
+    return CaseResult(case.case_id, "COMPLETE", [], trace)

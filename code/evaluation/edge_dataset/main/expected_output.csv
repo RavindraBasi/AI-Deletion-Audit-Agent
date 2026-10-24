@@ -28,3 +28,4 @@ case_e27,INCOMPLETE,"[{""step_no"": 1, ""phase"": ""FINDING"", ""system_id"": ""
 case_e28,NOT_APPLICABLE,[]
 case_e29,NOT_APPLICABLE,[]
 case_e30,COMPLETE,"[{""step_no"": 1, ""phase"": ""VERIFICATION"", ""system_id"": ""account_service"", ""resource_id"": ""account_8321"", ""operation"": ""VERIFY_RECORD_ABSENT"", ""state"": ""ABSENT"", ""evidence_id"": ""evidence_43""}]"
+case_e31,COMPLETE,[]

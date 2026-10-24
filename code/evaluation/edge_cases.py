@@ -655,13 +655,22 @@ def e30_on_behalf(ds, k):
                         lambda s, ev: ("COMPLETE", [V("account_service", s.acc, "VERIFY_RECORD_ABSENT", ev)]), present=False)
 
 
+def e31_no_footprint(ds, k):
+    s = subject(ds, 33, "Hugo Lambert", "hugo.lambert@example.net", "+32 470 41 09 33")
+    w = Window(k)
+    ds.request("case_e31", s.email, w.req, w.rep, w.aud, DELETE_TEXTS[2])
+    return [Case("case_e31", "Authorized deletion, no footprint",
+                 "Known subject asks for deletion; no evidence file or activity mentions any of their identifiers.",
+                 "NOT_APPLICABLE is only for non-deletion requests", "gate", ("COMPLETE", []))]
+
+
 MAIN_CASES = [e01_repeat_request, None, e02_restore_recreates, e03_old_phone_only, e04_old_email_hash,
               e05_partial_tombstone, e06_flow_already_stopped, e07_restore_already_blocked, e08_ordering_stress,
               e09_evidence_at_cutoff, e10_sync_after_cutoff, e11_not_started_but_done, e12_email_delivery_log,
               e13_pseudonymous_analytics, e14_screenshot_only_evidence, e15_file_listing_link,
               e16_screenshot_after_cutoff, e17_legal_hold_expired, e18_shared_attachment, e22_cyrillic_name,
               e23_cyrillic_email, e24_homoglyph_decoy, e25_first_last_exposed, e26_first_last_clean, e27_nested_name,
-              e28_withdrawn, e29_conditional, e30_on_behalf]
+              e28_withdrawn, e29_conditional, e30_on_behalf, e31_no_footprint]
 
 
 def build_main() -> tuple[EdgeDataset, list[Case]]:

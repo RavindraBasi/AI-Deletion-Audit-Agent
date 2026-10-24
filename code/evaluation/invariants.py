@@ -39,6 +39,9 @@ def contract(output: Path, requests: Path) -> list[str]:
     errors = validate_csv_text(output.read_text(encoding="utf-8"), ids)
     for cid, (status, sj) in read_rows(output).items():
         steps = json.loads(sj)
+        if status == "COMPLETE" and not steps:
+            # valid output (authorized deletion, no footprint), but on the real data it has meant a missed link
+            errors.append(f"{cid}: COMPLETE without steps (no observable footprint) - check linking")
         if status == "INCOMPLETE":
             for f in (s for s in steps if s["phase"] == "FINDING"):
                 key = (f["system_id"], f["resource_id"])
