@@ -1,6 +1,6 @@
 # Ghost Data Still Exists — Implementation Spec
 
-Status: **v1.1, approved decisions D1–D8** · Owner: architect · Audience: humans + coding agents working in parallel worktrees
+Status: **v1.2, approved decisions D1–D8 + test strategy §13** · Owner: architect · Audience: humans + coding agents working in parallel worktrees
 Contract sources (read-only, higher priority than this file): `AGENTS.md`, `problem_statement.md`, `README.md`.
 
 ---
@@ -307,6 +307,11 @@ append to the root `log.txt` per AGENTS.md §5 (set `parent_agent=`). Done = acc
 ### WP-0 — Contracts & skeleton  *(serial, first, ~1.5 h, blocks everyone)*
 - **Goal:** a frozen `models.py`, loaders, config, an end-to-end CLI stub that writes a valid
   `output.csv` (all NOT_APPLICABLE), and `output.py` with ordering, serialization and validation.
+- **CLI (contract for the e2e tests):** `main.py [--dataset-dir DIR] [--requests FILE] [--out PATH]
+  [--trace-dir DIR] [--cases sample|eval]`. Every path is overridable, so a test can point the whole
+  pipeline at a miniature fixture dataset. With `--trace-dir`, the pipeline writes one `<case_id>.json`
+  per case: the resolved identifiers, owned resources, the observations used with their evidence ids, the
+  per-resource decision, and the rule applied.
 - **Acceptance:** `python3 code/main.py` writes 518 valid rows. `--cases sample` writes 32. The validator
   rejects malformed steps (unit tests). Ordering is unit-tested against 3 sample rows.
 
@@ -375,9 +380,20 @@ append to the root `log.txt` per AGENTS.md §5 (set `parent_agent=`). Done = acc
   `usage_report.md` has per-model and overall calls, tokens in/out, totals and averages per request, and
   estimated cost. The zip passes the README checklist.
 
+### WP-6 — E2E scenario suite & quality gates  *(parallel after WP-0, ~4 h)*
+- **Owns:** `code/tests/e2e/**`, `code/evaluation/invariants.py`, `code/evaluation/check_all.py`.
+- **Goal:** the end-to-end layers of §13: a scenario fixture builder, ≥ 12 scenarios with expected
+  `output.csv`, invariant checks on the real 518-case run, and the single gate command
+  `python3 code/evaluation/check_all.py`.
+- **Constraint:** fixtures are written **black-box from the public contract** (problem statement, data formats
+  in §2.3). Their expected outputs are derived by hand, never by running the engine and freezing what it prints.
+- **Acceptance:** all scenarios run in under 10 s total. Each scenario fails against the WP-0 stub, which shows
+  it is sensitive to the behaviour it targets. `check_all.py` exits non-zero on any failure and prints a
+  one-screen summary.
+
 ### Integration (architect/orchestrator, continuous)
-Merge order: WP-0 → WP-1 → WP-2 → WP-3 → WP-4 → WP-5. After each merge:
-`python3 code/main.py --cases sample && python3 code/evaluation/main.py --sample` must not regress.
+Merge order: WP-0 → WP-1 → WP-2 → WP-3 → WP-4 → WP-5. Gate before notifying the human that a branch is MR-ready:
+`python3 code/evaluation/check_all.py` must be green, with no regression on the dev split or on scenarios (§13.5).
 
 ## 8. Dependency graph
 
@@ -385,7 +401,8 @@ Merge order: WP-0 → WP-1 → WP-2 → WP-3 → WP-4 → WP-5. After each merge
 WP-0 ──┬─► WP-1 ─┐
        ├─► WP-2 ─┼─► WP-4 (integration) ─► final run ─► WP-5 reports/zip
        ├─► WP-3 ─┘
-       └─► WP-5 (scorer early, reports at the end)
+       ├─► WP-5 (scorer early, reports at the end)
+       └─► WP-6 (e2e scenarios + invariants; gates every MR from M1 on)
 ```
 
 ## 9. Milestones (24 h budget; each milestone leaves a submittable state)
@@ -395,7 +412,7 @@ Deadline **2026-10-25 13:30 CET (12:30 UTC)**. Planning started 2026-10-24 ~15:0
 | Milestone | By (UTC) | Exit criteria |
 |---|---|---|
 | M0 | 10-24 17:00 | WP-0 branch ready for MR. Valid 518-row `output.csv` (stub). |
-| M1 | 10-24 22:30 | WP-1/2/3 ready. Engine v1 produces real statuses. Scorer runs on samples. Output validator is green. |
+| M1 | 10-24 22:30 | WP-1/2/3 ready. Engine v1 produces real statuses. Scorer runs on samples. WP-6 scenarios + `check_all.py` exist and gate MRs from here on. |
 | M2 | 10-25 05:00 | Sample parity ≥ 90% exact steps, 100% status. H1–H5 resolved. Warm LLM cache committed. |
 | M3 | 10-25 10:30 | Final full run on `replay`. Reports written. README done. `code.zip` built. `output.csv` at root. |
 | Submit | 10-25 12:30 | Submit by 11:30 UTC at the latest (1 h safety margin). `log.txt` validated (tool= / model= on every entry). |
@@ -444,3 +461,111 @@ the `openai` backend → visual extraction of images that the samples never cite
      *nice to have*. It is not required, because judging does not depend on it.
 - **Before submitting:** run the clean replay in a fresh clone with `GDA_LLM_BACKEND=replay` and no
   `.env`, and diff the result against the submitted `output.csv`. They must be byte-identical.
+
+## 13. Evaluation & test strategy
+
+The core problem: there are only **32 labeled samples**, and the 518 eval cases have no labels. One
+sample-match number would be overfit and misleading. Quality is therefore measured in **six layers**,
+and each layer catches a different class of error.
+
+| # | Layer | Labels needed | Catches | Owner |
+|---|---|---|---|---|
+| L1 | Unit tests per module | Hand-written asserts | Parser and normalization bugs | each WP |
+| L2 | Intent classifier eval | Own labeled set | Wrong NOT_APPLICABLE (costs the whole case) | WP-3 + WP-5 |
+| L3 | Sample regression with a dev/holdout split | `sample_output.csv` | Rule and citation drift, overfitting | WP-5 |
+| L4 | **E2E scenario suite** (synthetic mini-datasets) | Expected outputs written by hand | Each tricky behaviour in isolation | WP-6 |
+| L5 | **Invariant / metamorphic checks on the real 518 run** | None | Time travel, nondeterminism, decoys, contract violations | WP-6 |
+| L6 | Triage review of a stratified eval sample | Human or agent spot-check | Unknown unknowns on real data | architect |
+
+### 13.1 L2 — Intent classification quality
+- **Test set** (`code/evaluation/intent_cases.md`, a Markdown table so the judge can see it):
+  - all 32 sample texts (DELETE);
+  - ≥ 60 texts we write ourselves in EN/ES/PT/FR/JA/KO/DE. Each is fictional and targets one trap:
+    marketing-only opt-out, export/copy/download, correction, access request, login help, "don't delete",
+    "delete my old phone number only", polite deletion with no deletion verb ("close my account"), and
+    mixed requests (export *then* delete → DELETE).
+- **Metrics:** accuracy, plus precision and recall **for NON_DELETE** (the costly class), and a confusion
+  matrix — for the LLM backend and the offline heuristic separately.
+- **Eval-set agreement:** for the ~375 unique texts in `deletion_requests.csv`, report agreement between the
+  LLM and the heuristic. Every disagreement is listed and adjudicated by the human. This is review only:
+  no labels are hardcoded, and an adjudication changes a prompt or rule, never a case.
+- **Stability:** two classification runs (cache disabled for the second) must give identical labels. Any
+  flip is reported as low-confidence.
+- **Targets:** NON_DELETE recall = 100% and precision ≥ 95% on our set. LLM vs heuristic agreement ≥ 98%.
+
+### 13.2 L3 — Sample regression without overfitting
+- **Split:** dev = `case_01…case_22`, holdout = `case_23…case_32`. Engine authors tune on dev only.
+  Holdout scores are computed **only at milestones M2 and M3** and reported separately.
+- **Metrics** (the required `evaluation_report.md` content):
+  - case status accuracy;
+  - step-level precision, recall and F1, matching on the full step tuple without `step_no`;
+  - field-level accuracy for each of `phase/system_id/resource_id/operation/state/evidence_id`, with steps
+    aligned on `(phase, system_id, resource_id)`;
+  - sequence accuracy (the whole ordered array matches exactly);
+  - evidence-citation accuracy (separately, because H1 is the riskiest hypothesis);
+  - a per-operation confusion table.
+
+### 13.3 L4 — E2E scenario suite
+- **Mechanism:** `tests/e2e/builder.py` writes a miniature `dataset/` into a temporary directory. The
+  directory holds identities, audit log, activity, rules, a manifest, and evidence in **every real format**:
+  typed SQL, JSON-in-SQL replicas, snapshot bundle JSON, service export JSON, handover TXT, and logfmt,
+  JSON-line and syslog logs. Each scenario is ~20 lines of declarative Python plus its hand-written
+  `expected_output.csv`. The test runs `main.py --dataset-dir tmp --out tmp/output.csv` **as a subprocess**
+  (the true e2e entry point) and diffs the result against the expected file, step by step.
+- **Scenarios (minimum 12; the first 3–4 double as the required "≥ 3 custom evaluation cases"):**
+  1. Request uses a **historical email only** → resources found through the old email and its hash.
+  2. A **case-variant** and a **near-miss decoy** belonging to other users → not attributed.
+  3. **Evidence captured after `audit_at`** shows a record that was deleted → ignored. The case stays COMPLETE.
+  4. A **non-deletion request** in Korean on an otherwise-incomplete account → `NOT_APPLICABLE, []`.
+  5. A workflow claims `DELETE_RECORD SUCCESS`, but a later readback shows PRESENT → INCOMPLETE (claim ≠ proof).
+  6. The primary is clean but the **failover replica** still holds the profile → REMAINING_RECORD on account_service.
+  7. A search entry is deleted, then **"Active connector repopulated"** recreates it → finding + DISABLE_DATA_FLOW
+     before DELETE_RECORD.
+  8. A backup has **restore_allowed=1** → REPORT_RESTORE_RISK / BLOCK_RESTORE / VERIFY_RESTORE_BLOCKED.
+  9. A **tombstone** still has name/email → REDACT. A clean tombstone → VERIFY_RECORD_REDACTED with evidence.
+  10. A **support message with shared context** → REDACT, while an **attachment owned only by the subject** → DELETE.
+  11. A **security audit record in retention** → VERIFY_RECORD_PRESENT, never DELETE. A legal hold → retained.
+  12. **Analytics** identifiable → ANONYMIZE. A contact/marketing record → DELETE (H4).
+  13. A COMPLETE case with all treatments done → only VERIFICATION steps, each citing the latest evidence ≤ `audit_at`.
+  14. Log identifiers on **different lines joined by trace_id** → correctly linked.
+  15. An identity resolves to no user at all → defined behaviour (documented and asserted).
+- **Speed:** the whole suite runs in < 10 s with `GDA_LLM_BACKEND=offline`, so it runs on every change.
+  One extra scenario runs with the replay cache to cover the LLM path.
+
+### 13.4 L5 — Invariant and metamorphic checks on the real 518 run (`evaluation/invariants.py`)
+These need no labels and run on the full eval output plus the traces:
+- **Contract:**
+  - 518 rows, sorted, header exact;
+  - allowed phase/op/state pairs and the ordering rule;
+  - consecutive `step_no`;
+  - NOT_APPLICABLE ⇔ `[]`;
+  - COMPLETE ⇒ only VERIFICATION steps, each with a non-empty `evidence_id`;
+  - INCOMPLETE ⇒ ≥ 1 FINDING, every FINDING has a matching REMEDIATION and VERIFICATION, and remediation
+    and verification steps have an empty `evidence_id`.
+- **Evidence validity:** every cited id exists (manifest file_id / activity_id / audit_id), and its timestamp
+  is ≤ the case's `audit_at`.
+- **Time-travel invariance:** re-run with every evidence item after the case's `audit_at` physically removed
+  → identical row.
+- **Determinism:** two runs are byte-identical. Shuffling the row order of every CSV and the file order
+  gives an identical output. Replay is identical to the run that warmed the cache.
+- **Identifier invariance:** upper-casing or adding whitespace to the request email gives an identical row.
+- **Decoy robustness:** injecting synthetic near-miss records (an email with `.jr`, a digit changed)
+  into the evidence leaves the output unchanged.
+- **Policy sanity:** no DELETE on SECURITY_AUDIT_LOG, LEGAL_HOLD or BACKUP_ARCHIVE records. Every tombstone
+  ends up REDACTED, never ABSENT.
+
+### 13.5 Gates
+- **Per change (WP branch):** L1 + L4 + the L5 contract checks + no regression on L3 dev. All are run by
+  `python3 code/evaluation/check_all.py` (< 60 s, offline).
+- **Before MR notify:** the full `check_all.py` is green. Score deltas are pasted into the notification.
+- **M2:** L3 holdout ≥ 90% sequence accuracy and 100% status. L2 targets are met.
+- **M3 (final):** all layers are green on the final replay run. L6 triage is done. The numbers are written into
+  `evaluation_report.md` together with the failures found and the fixes made, using the `log.txt` history
+  of what each failing layer caught.
+
+### 13.6 L6 — Triage review
+Stratified sample of 20 eval cases (by status × reported_status × "historical email" × has-visual-evidence),
+plus every outlier: unresolved identity, 0 owned resources, > 6 findings, or an intent with confidence below 0.8.
+The architect (with an optional Claude-CLI reviewer, within budget) reads each trace and records
+agree/disagree with a reason in `evaluation_report.md`. A disagreement becomes a new L4 scenario before it
+is fixed.
