@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Any
 from pathlib import Path
 import json
-import sqlite3
+import re
 import pandas as pd
 
 from code import config
@@ -71,7 +71,7 @@ class GhostDetector:
             except Exception:
                 pass
 
-        # 1. Scan System Activity
+        # 1. Scan System Activity CSV
         if not filtered_activity.empty:
             for _, row in filtered_activity.iterrows():
                 details = str(row.get("details", ""))
@@ -82,7 +82,7 @@ class GhostDetector:
                 target_sys = str(row.get("target_system", ""))
 
                 # Check identifier match in details or resource_id
-                matched_ids = [id_str for id_str in identifiers if id_str in details or id_str in resource_id]
+                matched_ids = [id_str for id_str in identifiers if id_str.lower() in details.lower() or id_str.lower() in resource_id.lower()]
                 if not matched_ids:
                     continue
 
@@ -125,9 +125,13 @@ class GhostDetector:
             for _, row in filtered_evidence_files.iterrows():
                 file_id = str(row.get("file_id", ""))
                 file_path_str = str(row.get("file_path", ""))
-                file_path = config.BASE_DIR / file_path_str if not file_path_str.startswith("/") else Path(file_path_str)
 
-                if not file_path.exists():
+                # Correct path resolution: check DATASET_DIR first
+                p1 = config.DATASET_DIR / file_path_str
+                p2 = config.BASE_DIR / file_path_str
+                file_path = p1 if p1.exists() else (p2 if p2.exists() else None)
+
+                if not file_path:
                     continue
 
                 try:
@@ -153,37 +157,116 @@ class GhostDetector:
         findings = []
         suffix = file_path.suffix.lower()
 
-        # Handle JSON / TXT / LOG / SQL
-        content_text = ""
-        if suffix in (".json", ".txt", ".log", ".sql", ".csv"):
+        # Handle JSON files
+        if suffix == ".json":
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    content_text = f.read()
+                    data = json.load(f)
+                findings.extend(self._scan_json_data(data, file_path, file_id, identifiers))
             except Exception:
                 pass
 
-        if content_text:
-            matched_ids = [id_str for id_str in identifiers if id_str in content_text]
-            if matched_ids:
-                system_id = self._infer_system_id(file_path, content_text)
-                resource_id = self._infer_resource_id(file_path, content_text, matched_ids)
-                finding_type = self._infer_finding_type(content_text, matched_ids)
-
-                findings.append(
-                    Finding(
-                        finding_type=finding_type,
-                        system_id=system_id,
-                        resource_id=resource_id,
-                        state="PRESENT" if "REPORT_" in finding_type and "DATA_FLOW" not in finding_type and "RESTORE" not in finding_type else "ACTIVE",
-                        evidence_id=file_id,
-                        details=f"Match in {file_path.name}",
-                        matched_identifiers=matched_ids,
-                    )
-                )
+        # Handle SQL / LOG / TXT / CSV files
+        elif suffix in (".sql", ".log", ".txt", ".csv"):
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content_text = f.read()
+                findings.extend(self._scan_text_content(content_text, file_path, file_id, identifiers))
+            except Exception:
+                pass
 
         return findings
 
-    def _infer_system_id(self, file_path: Path, content: str) -> str:
+    def _scan_json_data(
+        self, data: Any, file_path: Path, file_id: str, identifiers: Set[str]
+    ) -> List[Finding]:
+        findings = []
+
+        def inspect(obj, current_system=None, current_resource=None):
+            if isinstance(obj, dict):
+                sys_id = obj.get("data_store") or obj.get("source") or obj.get("origin") or current_system
+                res_id = obj.get("resource_id") or current_resource
+
+                # Check if this node contains identifiers
+                obj_str = json.dumps(obj)
+                matched = [i for i in identifiers if i.lower() in obj_str.lower()]
+
+                if matched and res_id:
+                    finding_type = self._determine_finding_type(obj_str, matched, sys_id or "system_service")
+                    state = "ACTIVE" if "DATA_FLOW" in finding_type or "RESTORE" in finding_type else "PRESENT"
+                    findings.append(
+                        Finding(
+                            finding_type=finding_type,
+                            system_id=sys_id or self._infer_system_from_filename(file_path),
+                            resource_id=res_id,
+                            state=state,
+                            evidence_id=file_id,
+                            details=f"Match in JSON {file_path.name}",
+                            matched_identifiers=matched,
+                        )
+                    )
+                else:
+                    for k, v in obj.items():
+                        inspect(v, sys_id, res_id)
+            elif isinstance(obj, list):
+                for item in obj:
+                    inspect(item, current_system, current_resource)
+
+        inspect(data)
+        return findings
+
+    def _scan_text_content(
+        self, content: str, file_path: Path, file_id: str, identifiers: Set[str]
+    ) -> List[Finding]:
+        findings = []
+        lines = content.splitlines()
+
+        for line in lines:
+            line_lower = line.lower()
+            matched = [i for i in identifiers if i.lower() in line_lower]
+            if not matched:
+                continue
+
+            # Extract system_id
+            sys_id = None
+            m_sys = re.search(r"service=([a-zA-Z0-9_]+)", line)
+            if m_sys:
+                sys_id = m_sys.group(1)
+
+            # Extract resource_id
+            res_id = None
+            m_res = re.search(r"resource_id=([a-zA-Z0-9_]+)", line)
+            if m_res:
+                res_id = m_res.group(1)
+            else:
+                # Look for SQL VALUES ('resource_id', ...) or resource_id in quotes
+                m_sql = re.search(r"VALUES\s*\(\s*'([a-zA-Z0-9_]+)'", line)
+                if m_sql:
+                    res_id = m_sql.group(1)
+
+            if not sys_id:
+                sys_id = self._infer_system_from_filename(file_path)
+            if not res_id:
+                res_id = f"resource_{file_path.stem}"
+
+            finding_type = self._determine_finding_type(line, matched, sys_id)
+            state = "ACTIVE" if "DATA_FLOW" in finding_type or "RESTORE" in finding_type else "PRESENT"
+
+            findings.append(
+                Finding(
+                    finding_type=finding_type,
+                    system_id=sys_id,
+                    resource_id=res_id,
+                    state=state,
+                    evidence_id=file_id,
+                    details=f"Match in {file_path.name}",
+                    matched_identifiers=matched,
+                )
+            )
+
+        return findings
+
+    def _infer_system_from_filename(self, file_path: Path) -> str:
         name = file_path.name.lower()
         if "account" in name:
             return "account_service"
@@ -201,17 +284,14 @@ class GhostDetector:
             return "integration_service"
         elif "security" in name or "syslog" in name:
             return "security_service"
-        return "system_service"
+        return "account_service"
 
-    def _infer_resource_id(self, file_path: Path, content: str, matched_ids: List[str]) -> str:
-        # Default placeholder if resource id cannot be parsed from text
-        return f"resource_{file_path.stem}"
-
-    def _infer_finding_type(self, content: str, matched_ids: List[str]) -> str:
-        if "data_flow" in content.lower() or "connector" in content.lower():
+    def _determine_finding_type(self, text: str, matched_ids: List[str], system_id: str) -> str:
+        text_lower = text.lower()
+        if "data_flow" in system_id or "integration" in system_id or "connector" in text_lower or "data_flow" in text_lower:
             return "REPORT_ACTIVE_DATA_FLOW"
-        elif "backup" in content.lower() or "restore" in content.lower():
+        elif "backup" in system_id or "restore" in text_lower or "backup" in text_lower:
             return "REPORT_RESTORE_RISK"
-        elif "exposed" in content.lower() or "pii" in content.lower() or len(matched_ids) > 1:
+        elif "support" in system_id or "analytics" in system_id or "exposed" in text_lower or "redact" in text_lower or "pii" in text_lower:
             return "REPORT_EXPOSED_PII"
         return "REPORT_REMAINING_RECORD"

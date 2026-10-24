@@ -53,64 +53,99 @@ class IdentifierResolver:
     def _load_data(self) -> None:
         try:
             self.identities_df = pd.read_csv(self.identities_path)
-        except Exception as e:
+        except Exception:
             self.identities_df = pd.DataFrame()
 
         try:
             self.audit_log_df = pd.read_csv(self.audit_log_path)
-        except Exception as e:
+        except Exception:
             self.audit_log_df = pd.DataFrame()
 
     def resolve(self, initial_identifier: str) -> UserIdentity:
         """
-        Reconstruct complete UserIdentity footprint given an initial identifier (email, user_id, phone, etc.).
+        Reconstruct complete UserIdentity footprint given an initial identifier.
+        Uses an iterative recursive search over identities and audit log.
         """
-        target = str(initial_identifier).strip().lower() if initial_identifier else ""
         identity = UserIdentity()
-        if not target:
+        if not initial_identifier:
             return identity
 
-        # Search in current user identities snapshot
+        known_targets: Set[str] = {str(initial_identifier).strip().lower()}
         matched_user_ids: Set[str] = set()
 
-        if not self.identities_df.empty:
-            for _, row in self.identities_df.iterrows():
-                uid = str(row.get("user_id", "")).strip()
-                email = str(row.get("email", "")).strip()
-                phone = str(row.get("phone", "")).strip()
-                email_hash = str(row.get("email_hash", "")).strip()
-
-                if (
-                    target == uid.lower()
-                    or target == email.lower()
-                    or target == phone.lower()
-                    or target == email_hash.lower()
-                ):
-                    if uid:
-                        matched_user_ids.add(uid)
-
-        # Search in audit log
-        if not self.audit_log_df.empty:
-            for _, row in self.audit_log_df.iterrows():
-                uid = str(row.get("user_id", "")).strip()
-                old_val = str(row.get("old_value", "")).strip()
-                new_val = str(row.get("new_value", "")).strip()
-
-                if target == uid.lower() or target == old_val.lower() or target == new_val.lower():
-                    if uid:
-                        matched_user_ids.add(uid)
-
-        # If initial_identifier itself looks like email or user_id or phone, add to target set
         if "@" in initial_identifier:
             identity.emails.add(initial_identifier.strip())
         else:
             identity.other_identifiers.add(initial_identifier.strip())
 
-        # For matched user_ids, collect current identity & historical changes
+        changed = True
+        max_depth = 10
+        depth = 0
+
+        # Iterative recursive expansion until fixed point
+        while changed and depth < max_depth:
+            changed = False
+            depth += 1
+
+            # 1. Expand across user_identities.csv
+            if not self.identities_df.empty:
+                for _, row in self.identities_df.iterrows():
+                    uid = str(row.get("user_id", "")).strip()
+                    email = str(row.get("email", "")).strip()
+                    phone = str(row.get("phone", "")).strip()
+                    email_hash = str(row.get("email_hash", "")).strip()
+                    name = str(row.get("name", "")).strip()
+
+                    row_vals = {
+                        v.lower()
+                        for v in (uid, email, phone, email_hash, name)
+                        if v and v.lower() not in ("nan", "none", "", "[redacted]")
+                    }
+
+                    if known_targets.intersection(row_vals):
+                        if uid and uid.lower() not in ("nan", "none", "", "[redacted]"):
+                            if uid not in matched_user_ids:
+                                matched_user_ids.add(uid)
+                                changed = True
+
+                        for val in (email, phone, email_hash, name, uid):
+                            if val and val.lower() not in ("nan", "none", "", "[redacted]"):
+                                val_lower = val.lower()
+                                if val_lower not in known_targets:
+                                    known_targets.add(val_lower)
+                                    changed = True
+
+            # 2. Expand across user_audit_log.csv
+            if not self.audit_log_df.empty:
+                for _, row in self.audit_log_df.iterrows():
+                    uid = str(row.get("user_id", "")).strip()
+                    old_val = str(row.get("old_value", "")).strip()
+                    new_val = str(row.get("new_value", "")).strip()
+                    field_name = str(row.get("field_name", "")).strip().lower()
+
+                    row_vals = {
+                        v.lower()
+                        for v in (uid, old_val, new_val)
+                        if v and v.lower() not in ("nan", "none", "", "[redacted]")
+                    }
+
+                    if known_targets.intersection(row_vals):
+                        if uid and uid.lower() not in ("nan", "none", "", "[redacted]"):
+                            if uid not in matched_user_ids:
+                                matched_user_ids.add(uid)
+                                changed = True
+
+                        for val in (old_val, new_val, uid):
+                            if val and val.lower() not in ("nan", "none", "", "[redacted]"):
+                                val_lower = val.lower()
+                                if val_lower not in known_targets:
+                                    known_targets.add(val_lower)
+                                    changed = True
+
+        # Populate UserIdentity object with all matched user_ids and field values
         for uid in matched_user_ids:
             identity.user_id = uid
 
-            # Get current identity row
             if not self.identities_df.empty:
                 user_rows = self.identities_df[self.identities_df["user_id"] == uid]
                 for _, row in user_rows.iterrows():
@@ -119,7 +154,6 @@ class IdentifierResolver:
                     phone = str(row.get("phone", "")).strip()
                     email_hash = str(row.get("email_hash", "")).strip()
 
-                    # Check for tombstone: user_id exists, but name/email/phone are empty/null/nan or '[REDACTED]'
                     if (
                         not email or email.lower() in ("nan", "none", "", "[redacted]")
                     ) and (
@@ -136,7 +170,6 @@ class IdentifierResolver:
                     if email_hash and email_hash.lower() not in ("nan", "none", "[redacted]"):
                         identity.email_hashes.add(email_hash)
 
-            # Get audit log historical values
             if not self.audit_log_df.empty:
                 audit_rows = self.audit_log_df[self.audit_log_df["user_id"] == uid]
                 for _, row in audit_rows.iterrows():
