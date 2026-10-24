@@ -155,3 +155,8 @@ Before submitting, confirm that:
 - `code.zip` includes your runnable code, `README.md`, `code/evaluation/evaluation_report.md`, and `code/evaluation/usage_report.md`;
 - `log.txt` follows the `AGENTS.md` turn format and is uploaded to the `chat_transcript` slot; and
 - no API keys, credentials, real personal data, or sensitive configuration values are included.
+
+
+## Kaggle local experiments
+
+The offline experiment pipeline is documented in [code/KAGGLE.md](code/KAGGLE.md), with a notebook at [code/kaggle/experiment.ipynb](code/kaggle/experiment.ipynb). Start with CPU evidence preparation; attach local model weights to run inference. No paid APIs are used. This is initial experimental infrastructure, not a validated challenge solution.

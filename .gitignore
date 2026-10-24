@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+artifacts/
+output.csv
+code.zip
+.env
