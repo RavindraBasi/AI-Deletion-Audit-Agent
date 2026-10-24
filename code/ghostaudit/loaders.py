@@ -10,7 +10,8 @@ from pathlib import Path
 
 from .models import Activity, AuditEntry, Case, EvidenceFile, Identity, Rule
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+# Unicode-aware: internationalised addresses (e.g. Cyrillic local part and IDN domain) are emails too
+EMAIL_RE = re.compile(r"[\w.%+\-]+@[\w\-]+(?:\.[\w\-]+)*\.[^\W\d_]{2,}")
 HASH_RE = re.compile(r"\b[0-9a-f]{64}\b")
 USER_RE = re.compile(r"\buser_\d+\b")
 log = logging.getLogger(__name__)
