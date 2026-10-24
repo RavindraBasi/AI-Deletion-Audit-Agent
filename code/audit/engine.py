@@ -264,6 +264,13 @@ class Auditor:
             v.via = why
             views[rid] = v
         self.fill_absence_evidence(views, req)
+        # a record known only from the activity stream (e.g. a retained legal hold) cites that
+        # activity when nothing in the evidence files shows it
+        for v in views.values():
+            if not v.evidence_id:
+                acts = sorted(a for a, _ in v.via if str(a).startswith("activity_"))
+                if acts:
+                    v.evidence_id = acts[0]
         findings, rems, vers = self.plan(list(views.values()))
         complete = not findings
         if not complete:

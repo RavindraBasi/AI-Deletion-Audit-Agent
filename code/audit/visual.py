@@ -183,13 +183,17 @@ def facts_from_transcriptions(raw: dict, manifest: list[dict], activity: list[di
     for fid, out in raw.items():
         row = rows[fid]
         obs = []
-        for rec in out.get("records", []):
-            rid = resolve_reference(rec["reference"], row["origin"], aliases)
+        records = out.get("records", [])
+        resolved = [(rec, resolve_reference(rec["reference"], row["origin"], aliases)) for rec in records]
+        # a PDF that describes its own uploaded file is that ticket's attachment
+        is_upload = row["file_path"].lower().endswith(".pdf") and any(
+            rec.get("is_attachment") and not rid for rec, rid in resolved)
+        for rec, rid in resolved:
             state = condition_state(rid, rec) if rid else None
             if not state:
                 continue
             cat = category_of(rid)
-            if rec.get("is_attachment") and prefix_of(rid) == "support":
+            if (rec.get("is_attachment") or is_upload) and prefix_of(rid) == "support":
                 cat = "SUPPORT_ATTACHMENT"
             obs.append({"resource_id": rid, "system_id": system_of(rid), "category": cat,
                         "state": state, "identifiers": rec.get("identifiers", []),
